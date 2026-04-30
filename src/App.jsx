@@ -210,9 +210,6 @@ export default function App() {
       <div className="w-full max-w-xl md:max-w-2xl bg-white min-h-screen shadow-2xl relative flex flex-col overflow-hidden">
         
         {/* Header */}
-        <div className="bg-red-600 text-white text-xs font-mono p-2 text-center" style={{ zIndex: 9999 }}>
-          DEBUG: Session Email = {session?.user?.email} | Profile Role = {profile?.role || 'NULL/NO-EXISTE'}
-        </div>
         <header className="shrink-0 z-[60] bg-white p-6 pb-2 flex flex-col relative pt-[max(1.5rem,env(safe-area-inset-top))]">
           <div className="flex justify-between items-start mb-2">
             <h1 className="text-[#FFC400] text-3xl font-black italic tracking-tight">
