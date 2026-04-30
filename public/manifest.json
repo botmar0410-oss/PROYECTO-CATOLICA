@@ -1,0 +1,16 @@
+{
+  "short_name": "IECON",
+  "name": "Independientes Economía",
+  "icons": [
+    {
+      "src": "https://raw.githubusercontent.com/Gael04-web/assets-web/4d78ca7b26809e93fe82d22386a538ee428eb9ff/logo_SER-removebg-preview.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ],
+  "start_url": ".",
+  "display": "standalone",
+  "theme_color": "#0012A6",
+  "background_color": "#ffffff"
+}
