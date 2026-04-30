@@ -15,7 +15,9 @@ import {
   Star,
   Settings,
   LogOut,
-  ChevronRight
+  ChevronRight,
+  Eye,
+  EyeOff
 } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
 import { Html5Qrcode } from 'html5-qrcode';
@@ -25,34 +27,26 @@ import { supabase } from './supabase';
 import Auth from './Auth';
 import AdminDashboard from './AdminDashboard';
 
-// Helper to determine current partial
-const isSecondPartial = new Date().getMonth() >= 6; // starts in July (index 6)
+// Helper removed: partials logic no longer used
 
 // Helper to determine current XP Rank
-const getRank = (xp) => {
-  const currentLevel = [...LEVELS].reverse().find(l => xp >= l.minXp);
+const getRank = (xp, levels) => {
+  if (!levels || levels.length === 0) return 1;
+  const currentLevel = [...levels].sort((a,b) => b.min_xp - a.min_xp).find(l => xp >= l.min_xp);
   return currentLevel ? currentLevel.level : 1;
 };
 
-const LEVELS = [
-  { level: 1, minXp: 0, reward: null },
-  { level: 2, minXp: 1000, reward: 'Pop Sucket' },
-  { level: 3, minXp: 3000, reward: 'Gorra' },
-  { level: 4, minXp: 6500, reward: 'Bolsa con Termo' },
-  { level: 5, minXp: 10000, reward: 'Chompa' },
-];
-
 const CHECKPOINTS = [
-  { id: 1, title: 'Bienvenida', pts: 500, p1: 'Bienvenida', f1: '04-12/05', p2: 'Bienvenida Parcial 2', f2: '01/07', lugar: 'Campus', hora: 'TBA' },
-  { id: 2, title: 'Búsqueda del Tesoro', pts: 500, p1: 'Búsqueda del tesoro', f1: '13/05', p2: 'Búsqueda del tesoro P2', f2: '15/07', lugar: 'Campus', hora: 'TBA' },
-  { id: 3, title: 'Integración', pts: 1000, p1: 'Integración', f1: '15/05', p2: 'Charla', f2: '21/07', lugar: 'Campus', hora: 'TBA' },
-  { id: 4, title: 'Jueves Amarillo', pts: 750, p1: 'Jueves amarillo', f1: '21/05', p2: 'Curso', f2: 'TBA', lugar: 'Campus', hora: 'TBA' },
-  { id: 5, title: 'Charla', pts: 1250, p1: 'Charla', f1: '26/05', p2: '4K', f2: 'TBA', lugar: 'Campus', hora: 'TBA' },
-  { id: 6, title: 'Ayuda a Fundación', pts: 700, p1: 'Ayuda a fundación', f1: '29/05', p2: 'Día de cine', f2: 'TBA', lugar: 'Campus', hora: 'TBA' },
-  { id: 7, title: 'Bingo del Niño', pts: 800, p1: 'Bingo del niño', f1: '01/06', p2: 'Feria de emprendimiento', f2: 'TBA', lugar: 'Campus', hora: 'TBA' },
-  { id: 8, title: 'Curso', pts: 1000, p1: 'Curso', f1: '03/06', p2: 'Fiesta', f2: 'TBA', lugar: 'Campus', hora: 'TBA' },
-  { id: 9, title: 'Fiesta', pts: 1500, p1: 'Fiesta', f1: '12/06', p2: 'Caravana', f2: '31/07', lugar: 'Campus', hora: 'TBA' },
-  { id: 10, title: 'Torneo Fut Relámpago', pts: 2000, p1: 'Torneo Fut Relámpago', f1: '20/06', p2: 'Elecciones', f2: 'TBA', lugar: 'Campus', hora: 'TBA' },
+  { id: 1, title: 'Bienvenida', pts: 500, lugar: 'Campus', hora: 'TBA' },
+  { id: 2, title: 'Búsqueda del Tesoro', pts: 500, lugar: 'Campus', hora: 'TBA' },
+  { id: 3, title: 'Integración', pts: 1000, lugar: 'Campus', hora: 'TBA' },
+  { id: 4, title: 'Jueves Amarillo', pts: 750, lugar: 'Campus', hora: 'TBA' },
+  { id: 5, title: 'Charla', pts: 1250, lugar: 'Campus', hora: 'TBA' },
+  { id: 6, title: 'Ayuda a Fundación', pts: 700, lugar: 'Campus', hora: 'TBA' },
+  { id: 7, title: 'Bingo del Niño', pts: 800, lugar: 'Campus', hora: 'TBA' },
+  { id: 8, title: 'Curso', pts: 1000, lugar: 'Campus', hora: 'TBA' },
+  { id: 9, title: 'Fiesta', pts: 1500, lugar: 'Campus', hora: 'TBA' },
+  { id: 10, title: 'Torneo Fut Relámpago', pts: 2000, lugar: 'Campus', hora: 'TBA' },
 ];
 
 export default function App() {
@@ -63,12 +57,21 @@ export default function App() {
   const [level, setLevel] = useState(1);
   const [xp, setXp] = useState(0);
   const [badges, setBadges] = useState([]);
+  const [levels, setLevels] = useState([]);
   const [activeTab, setActiveTab] = useState('camino');
   const [activeCp, setActiveCp] = useState(null);
   const [showQR, setShowQR] = useState(false);
   const [selectedTasks, setSelectedTasks] = useState([]);
   const [activities, setActivities] = useState(CHECKPOINTS);
   const [scanError, setScanError] = useState(null);
+  const [retryKey, setRetryKey] = useState(0);
+  
+  // Password Change States
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [passwordChangeLoading, setPasswordChangeLoading] = useState(false);
+  const [passwordError, setPasswordError] = useState(null);
+  const [showPass, setShowPass] = useState(false);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -76,6 +79,7 @@ export default function App() {
       if (session) {
         fetchProfile(session.user.id);
         fetchActivitiesFromDB();
+        fetchLevels();
       }
       else setIsAuthLoading(false);
     });
@@ -85,6 +89,7 @@ export default function App() {
       if (session) {
         fetchProfile(session.user.id);
         fetchActivitiesFromDB();
+        fetchLevels();
       }
       else {
         setProfile(null);
@@ -94,6 +99,28 @@ export default function App() {
 
     return () => subscription.unsubscribe();
   }, []);
+
+  const fetchLevels = async () => {
+    try {
+      const { data, error } = await supabase
+        .from('levels')
+        .select('*')
+        .order('level', { ascending: true });
+      
+      if (error) throw error;
+      if (data) setLevels(data);
+    } catch (err) {
+      console.warn("Table 'levels' not found, using default levels logic.");
+      // Fallback defaults if table doesn't exist yet
+      setLevels([
+        { level: 1, min_xp: 0, reward: null },
+        { level: 2, min_xp: 1000, reward: 'Pop Sucket' },
+        { level: 3, min_xp: 3000, reward: 'Gorra' },
+        { level: 4, min_xp: 6500, reward: 'Bolsa con Termo' },
+        { level: 5, min_xp: 10000, reward: 'Chompa' }
+      ]);
+    }
+  };
 
   const fetchActivitiesFromDB = async () => {
     try {
@@ -119,6 +146,7 @@ export default function App() {
         setProfile(data);
         setLevel(data.current_level || 1);
         setXp(data.xp_total || 0);
+        setBadges(data.badges || []);
       }
     } catch (err) {
       console.error("Error fetching profile", err);
@@ -127,9 +155,53 @@ export default function App() {
     }
   };
 
-  const updateProgressInDB = async (newLevel, newXp) => {
+  const updateProgressInDB = async (newLevel, newXp, newBadges = null) => {
     if (!session) return;
-    await supabase.from('profiles').update({ current_level: newLevel, xp_total: newXp }).eq('id', session.user.id);
+    const updateData = { current_level: newLevel, xp_total: newXp };
+    if (newBadges) updateData.badges = newBadges;
+    await supabase.from('profiles').update(updateData).eq('id', session.user.id);
+  };
+
+  const handleChangePassword = async (e) => {
+    e.preventDefault();
+    setPasswordError(null);
+    
+    if (newPassword.length < 6) {
+      setPasswordError('La contraseña debe tener al menos 6 caracteres.');
+      return;
+    }
+    
+    if (newPassword !== confirmPassword) {
+      setPasswordError('Las contraseñas no coinciden.');
+      return;
+    }
+
+    try {
+      setPasswordChangeLoading(true);
+      
+      // Update Auth Password
+      const { error: authError } = await supabase.auth.updateUser({
+        password: newPassword
+      });
+      if (authError) throw authError;
+
+      // Update Profile flag
+      const { error: profileError } = await supabase
+        .from('profiles')
+        .update({ must_change_password: false })
+        .eq('id', session.user.id);
+      if (profileError) throw profileError;
+
+      // Update local state
+      setProfile(prev => ({ ...prev, must_change_password: false }));
+      alert('¡Contraseña actualizada con éxito!');
+      
+    } catch (err) {
+      console.error(err);
+      setPasswordError(err.message || 'Error al actualizar la contraseña');
+    } finally {
+      setPasswordChangeLoading(false);
+    }
   };
 
   const handleComplete = () => {
@@ -150,15 +222,22 @@ export default function App() {
       const newXp = xp + activeCp.pts;
       const nextCheckpoint = activeCp.id + 1;
       
-      setXp(newXp);
-      setLevel(nextCheckpoint);
-      updateProgressInDB(nextCheckpoint, newXp);
+      // Calculate new badges
+      let updatedBadges = [...badges];
+      let earnedNewBadge = false;
       
-      LEVELS.forEach(lvl => {
-        if (newXp >= lvl.minXp && lvl.reward && !badges.includes(lvl.reward)) {
-          setBadges(prev => [...prev, lvl.reward]);
+      levels.forEach(lvl => {
+        if (newXp >= lvl.min_xp && lvl.reward && !updatedBadges.includes(lvl.reward)) {
+          updatedBadges.push(lvl.reward);
+          earnedNewBadge = true;
         }
       });
+      
+      setXp(newXp);
+      setLevel(nextCheckpoint);
+      if (earnedNewBadge) setBadges(updatedBadges);
+      
+      updateProgressInDB(nextCheckpoint, newXp, earnedNewBadge ? updatedBadges : null);
     }
     setActiveCp(null);
     setShowQR(false);
@@ -201,8 +280,104 @@ export default function App() {
     );
   }
 
+  if (profile?.must_change_password) {
+    console.log("DEBUG: must_change_password is TRUE", profile);
+    return (
+      <div className="min-h-screen bg-slate-900 flex items-center justify-center font-['Outfit'] p-6">
+        <motion.div 
+          initial={{ opacity: 0, scale: 0.9 }}
+          animate={{ opacity: 1, scale: 1 }}
+          className="bg-white w-full max-w-md rounded-[40px] shadow-2xl overflow-hidden border-t-8 border-[#FFD233]"
+        >
+          <div className="bg-[#0012A6] p-8 text-white text-center">
+            <div className="w-20 h-20 bg-white/10 rounded-3xl flex items-center justify-center mx-auto mb-4 border border-white/20">
+               <Shield size={40} className="text-[#FFD233]" />
+            </div>
+            <h2 className="text-3xl font-black italic mb-2 tracking-tight">SEGURIDAD REQUERIDA</h2>
+            <p className="text-blue-200 font-bold text-sm uppercase tracking-widest opacity-80">Debes actualizar tu contraseña</p>
+          </div>
+
+          <form onSubmit={handleChangePassword} className="p-8 space-y-6">
+            <p className="text-slate-500 font-medium text-center text-sm leading-relaxed">
+              Has ingresado con una clave temporal. Por seguridad, por favor define una nueva contraseña personal para continuar.
+            </p>
+
+            {passwordError && (
+              <div className="bg-rose-50 border border-rose-200 text-rose-600 p-4 rounded-2xl text-xs font-bold flex items-center gap-2">
+                <X size={16} /> {passwordError}
+              </div>
+            )}
+
+            <div className="space-y-4">
+              <div>
+                <label className="text-[10px] font-black text-slate-400 uppercase ml-2 tracking-widest">Nueva Contraseña</label>
+                <div className="relative">
+                  <Lock className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300" size={18} />
+                  <input 
+                    type={showPass ? "text" : "password"} 
+                    required
+                    placeholder="Mínimo 6 caracteres"
+                    value={newPassword}
+                    onChange={e => setNewPassword(e.target.value)}
+                    className="w-full bg-slate-50 border border-slate-200 p-4 pl-12 pr-12 rounded-2xl font-bold outline-none focus:border-[#0012A6] transition-all"
+                  />
+                  <button 
+                    type="button"
+                    onClick={() => setShowPass(!showPass)}
+                    className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 z-10"
+                  >
+                    {showPass ? <EyeOff size={20} /> : <Eye size={20} />}
+                  </button>
+                </div>
+              </div>
+
+              <div>
+                <label className="text-[10px] font-black text-slate-400 uppercase ml-2 tracking-widest">Confirmar Contraseña</label>
+                <div className="relative">
+                  <Lock className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300" size={18} />
+                  <input 
+                    type={showPass ? "text" : "password"} 
+                    required
+                    placeholder="Repite tu nueva contraseña"
+                    value={confirmPassword}
+                    onChange={e => setConfirmPassword(e.target.value)}
+                    className="w-full bg-slate-50 border border-slate-200 p-4 pl-12 pr-12 rounded-2xl font-bold outline-none focus:border-[#0012A6] transition-all"
+                  />
+                  <button 
+                    type="button"
+                    onClick={() => setShowPass(!showPass)}
+                    className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 z-10"
+                  >
+                    {showPass ? <EyeOff size={20} /> : <Eye size={20} />}
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <button 
+              disabled={passwordChangeLoading}
+              type="submit"
+              className="w-full bg-[#0012A6] text-white font-black py-4 rounded-2xl text-lg shadow-[0_6px_0_0_#000B66] active:translate-y-1 active:shadow-none transition-all flex justify-center items-center gap-2"
+            >
+              {passwordChangeLoading ? 'GUARDANDO...' : 'ACTUALIZAR Y ENTRAR'}
+              {!passwordChangeLoading && <ChevronRight size={22} strokeWidth={3} />}
+            </button>
+
+            <button 
+              type="button"
+              onClick={() => supabase.auth.signOut()}
+              className="w-full text-slate-400 font-bold text-sm hover:text-slate-600 transition-colors"
+            >
+              Cancelar y Salir
+            </button>
+          </form>
+        </motion.div>
+      </div>
+    );
+  }
+
   if (profile?.role === 'admin' || profile?.role === 'master') {
-    return <AdminDashboard session={session} profile={profile} />;
+    return <AdminDashboard session={session} profile={profile} levels={levels} onLevelsUpdate={fetchLevels} />;
   }
 
   return (
@@ -213,7 +388,7 @@ export default function App() {
         <header className="shrink-0 z-[60] bg-white p-6 pb-2 flex flex-col relative pt-[max(1.5rem,env(safe-area-inset-top))]">
           <div className="flex justify-between items-start mb-2">
             <h1 className="text-[#FFC400] text-3xl font-black italic tracking-tight">
-               Nivel {getRank(xp)}
+               Nivel {getRank(xp, levels)}
             </h1>
             {/* Logo SER */}
             <div className="w-24 h-24 relative -mt-4 -mr-2 drop-shadow-xl flex justify-center items-center">
@@ -230,7 +405,7 @@ export default function App() {
                <motion.div 
                  className="h-full bg-gradient-to-r from-[#8B4513] via-[#DAA520] to-black rounded-full"
                  initial={{ width: 0 }}
-                 animate={{ width: `${Math.min((level - 1) / CHECKPOINTS.length * 100, 100)}%` }}
+                 animate={{ width: `${Math.min((level - 1) / (activities.length || 10) * 100, 100)}%` }}
                  transition={{ duration: 1, ease: "circOut" }}
                />
              </div>
@@ -314,11 +489,12 @@ export default function App() {
               >
                 <h2 className="text-3xl font-black text-slate-800 mb-6">Mis Premios</h2>
                 <div className="grid grid-cols-2 gap-4">
-                  {LEVELS.filter(l => l.reward).map((lvl) => {
-                    const isUnlocked = getRank(xp) >= lvl.level;
+                  {(levels && levels.length > 0 ? levels : []).filter(l => l.reward).map((lvl) => {
+                    // CÁLCULO POR LOGROS ADQUIRIDOS: Comparación con el arreglo de badges
+                    const isUnlocked = badges.includes(lvl.reward);
                     return (
                       <div 
-                        key={lvl.level}
+                        key={lvl.id || lvl.level}
                         className={`p-4 rounded-[24px] border-2 text-center transition-all ${
                           isUnlocked ? 'bg-white border-secondary/20 shadow-lg' : 'bg-slate-50 border-transparent grayscale'
                         }`}
@@ -332,11 +508,16 @@ export default function App() {
                           {lvl.reward}
                         </p>
                         <p className="text-[10px] text-slate-400 mt-1 uppercase font-bold tracking-widest">
-                          Nivel {lvl.level} {isUnlocked ? '• Desbloqueado' : `• ${lvl.minXp} XP`}
+                          {isUnlocked ? '¡Desbloqueado!' : `Nivel ${lvl.level} • ${lvl.min_xp} XP`}
                         </p>
                       </div>
                     );
                   })}
+                  {(!levels || levels.length === 0) && (
+                    <div className="col-span-2 py-12 text-center text-slate-400 font-bold">
+                       Configurando sistema de niveles...
+                    </div>
+                  )}
                 </div>
               </motion.div>
             )}
@@ -359,10 +540,21 @@ export default function App() {
                     </div>
                   </div>
                   <h3 className="text-2xl font-black text-slate-800 mb-1">{profile?.full_name || 'Estudiante'}</h3>
-                  <p className="text-slate-400 font-bold mb-6 truncate">{profile?.email || session?.user?.email}</p>
+                  <p className="text-slate-400 font-bold mb-2 truncate">{profile?.email || session?.user?.email}</p>
+                  
+                  {profile?.carrera && (
+                    <div className="flex flex-col items-center mb-6">
+                      <span className="bg-blue-100 text-[#0012A6] text-[10px] font-black px-3 py-1 rounded-full uppercase tracking-widest mb-1">
+                        {profile.carrera}
+                      </span>
+                      <span className="text-slate-400 text-[10px] font-black uppercase tracking-widest">
+                        {profile.ciclo} Ciclo • {profile.edad} años
+                      </span>
+                    </div>
+                  )}
                   
                   <div className="grid grid-cols-3 gap-4">
-                    <StatItem icon={<TrendingUp size={20} />} label="Nivel" value={level} color="text-primary" />
+                    <StatItem icon={<TrendingUp size={20} />} label="Actividades" value={level} color="text-primary" />
                     <StatItem icon={<Zap size={20} />} label="XP" value={xp} color="text-secondary-dark" />
                     <StatItem icon={<Award size={20} />} label="Logros" value={badges.length} color="text-yellow-600" />
                   </div>
@@ -433,26 +625,28 @@ export default function App() {
                 {!showQR ? (
                   <div className="text-left w-full pb-4">
                     <h2 className="text-4xl font-black text-[#0012A6] mb-4 tracking-tighter leading-tight">
-                       {isSecondPartial ? (activeCp.p2 || activeCp.title) : (activeCp.p1 || activeCp.title)}
+                       {activeCp.title}
                     </h2>
                     
                     <div className="space-y-4 mb-8">
-                       <div className={`p-5 rounded-[32px] border-2 shadow-sm ${isSecondPartial ? 'bg-amber-50 border-amber-100' : 'bg-blue-50 border-blue-100'}`}>
-                          <p className={`text-[10px] font-black uppercase tracking-[0.2em] mb-2 ${isSecondPartial ? 'text-amber-500' : 'text-blue-500'}`}>
-                             {isSecondPartial ? 'SEGUNDO PARCIAL (P2)' : 'PRIMER PARCIAL (P1)'}
+                       <div className="p-5 rounded-[32px] border-2 shadow-sm bg-blue-50 border-blue-100">
+                          <p className="text-[10px] font-black uppercase tracking-[0.2em] mb-2 text-blue-500">
+                             ACTIVIDAD
                           </p>
                           <div className="flex items-start justify-between gap-4">
                              <div>
                                 <p className="text-2xl font-black text-slate-800 leading-tight mb-1">
-                                   {isSecondPartial ? (activeCp.p2 || activeCp.title) : (activeCp.p1 || activeCp.title)}
+                                   {activeCp.title}
                                 </p>
-                                <p className="text-sm font-bold text-slate-500">
-                                   {isSecondPartial ? (activeCp.f2 || 'Fecha por definir') : (activeCp.f1 || 'Fecha por definir')}
-                                </p>
+                                {activeCp.lugar && (
+                                   <p className="text-sm font-bold text-slate-500">
+                                      Lugar: {activeCp.lugar}
+                                   </p>
+                                )}
                              </div>
                              <div className="bg-white/80 p-3 rounded-2xl shadow-inner font-black text-center min-w-[70px]">
                                 <p className="text-[10px] text-slate-400 uppercase leading-none mb-1">XP</p>
-                                <p className={`text-xl ${isSecondPartial ? 'text-amber-600' : 'text-blue-600'}`}>+{activeCp.pts}</p>
+                                <p className="text-xl text-blue-600">+{activeCp.pts}</p>
                              </div>
                           </div>
                        </div>
@@ -482,6 +676,7 @@ export default function App() {
                     
                     <div className="relative mx-auto w-full max-w-[280px] aspect-square bg-slate-100 rounded-[40px] overflow-hidden border-4 border-[#0012A6] mb-6 shadow-xl">
                        <QRScanner 
+                         key={retryKey}
                          onResult={(token) => {
                            if (token === activeCp.qr_token) {
                              nextLevel();
@@ -495,8 +690,11 @@ export default function App() {
                             <X size={48} strokeWidth={3} className="mb-2" />
                             <p className="font-black text-center leading-tight">{scanError}</p>
                             <button 
-                              onClick={() => setScanError(null)}
-                              className="mt-4 bg-white text-rose-600 px-4 py-2 rounded-xl font-bold text-xs"
+                              onClick={() => {
+                                setScanError(null);
+                                setRetryKey(prev => prev + 1);
+                              }}
+                              className="mt-4 bg-white text-rose-600 px-6 py-3 rounded-2xl font-black text-sm shadow-lg active:scale-95 transition-all"
                             >
                               REINTENTAR
                             </button>
