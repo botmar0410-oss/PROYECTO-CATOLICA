@@ -3,12 +3,13 @@ import { supabase } from './supabase';
 import { LogOut, Users, ShieldAlert, Star, Trash2, Plus, Minus, UserCheck, Shield, Ban, QrCode, Key } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
 
-export default function AdminDashboard({ session, profile }) {
+export default function AdminDashboard({ session, profile, levels = [], onLevelsUpdate }) {
   const [students, setStudents] = useState([]);
   const [activities, setActivities] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState('usuarios'); // 'usuarios' or 'actividades'
+  const [activeTab, setActiveTab] = useState('usuarios'); // 'usuarios', 'actividades', 'niveles'
   const [editingActivity, setEditingActivity] = useState(null);
+  const [editingLevel, setEditingLevel] = useState(null);
   const [qrModalActivity, setQrModalActivity] = useState(null);
   const [resetResult, setResetResult] = useState(null); // { email, newPassword }
 
@@ -16,11 +17,41 @@ export default function AdminDashboard({ session, profile }) {
 
   useEffect(() => {
     fetchData();
+
+    const channel = supabase
+      .channel('admin-profiles-changes')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'profiles' },
+        (payload) => {
+          // OPTIMIZACIÓN: En lugar de hacer una nueva consulta a la base de datos completa (fetchStudents),
+          // actualizamos el estado local de React directamente con los datos que nos envía el evento en tiempo real.
+          setStudents((currentStudents) => {
+            if (payload.eventType === 'UPDATE') {
+              const updated = currentStudents.map(student => 
+                student.id === payload.new.id ? payload.new : student
+              );
+              // Volver a ordenar por xp_total descendente
+              return updated.sort((a, b) => b.xp_total - a.xp_total);
+            } else if (payload.eventType === 'INSERT') {
+              return [...currentStudents, payload.new].sort((a, b) => b.xp_total - a.xp_total);
+            } else if (payload.eventType === 'DELETE') {
+              return currentStudents.filter(student => student.id !== payload.old.id);
+            }
+            return currentStudents;
+          });
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
   }, []);
 
   const fetchData = async () => {
     setLoading(true);
-    await Promise.all([fetchStudents(), fetchActivities()]);
+    await Promise.all([fetchStudents(true), fetchActivities()]);
     setLoading(false);
   };
 
@@ -38,10 +69,9 @@ export default function AdminDashboard({ session, profile }) {
     }
   };
 
-  const fetchStudents = async () => {
+  const fetchStudents = async (silent = false) => {
     try {
-      setLoading(true);
-      // Fetch everybody, we'll disable UI based on roles
+      if (!silent) setLoading(true);
       const { data, error } = await supabase
         .from('profiles')
         .select('*')
@@ -52,7 +82,7 @@ export default function AdminDashboard({ session, profile }) {
     } catch (err) {
       console.error("Error cargando estudiantes", err);
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   };
 
@@ -67,18 +97,16 @@ export default function AdminDashboard({ session, profile }) {
     }
   };
 
+  const getRank = (xp) => {
+    if (!levels || levels.length === 0) return 1;
+    const matched = [...levels].sort((a,b) => b.min_xp - a.min_xp).find(l => xp >= l.min_xp);
+    return matched ? matched.level : 1;
+  };
+
   const handleUpdateXP = async (id, currentXP, amount) => {
     const newXP = Math.max(0, currentXP + amount);
-    
-    // Thresholds: 1000, 3000, 6500, 10000
-    let newLevel = 1;
-    if (newXP >= 10000) newLevel = 5;
-    else if (newXP >= 6500) newLevel = 4;
-    else if (newXP >= 3000) newLevel = 3;
-    else if (newXP >= 1000) newLevel = 2;
-
     try {
-      const { error } = await supabase.from('profiles').update({ xp_total: newXP, current_level: newLevel }).eq('id', id);
+      const { error } = await supabase.from('profiles').update({ xp_total: newXP }).eq('id', id);
       if (error) throw error;
       fetchStudents();
     } catch (err) {
@@ -86,19 +114,25 @@ export default function AdminDashboard({ session, profile }) {
     }
   };
 
-  const handleDelete = async (id) => {
-    if(!window.confirm("¿Estás seguro de eliminar este registro permanentemente? Esta acción borrará la cuenta de autenticación y los datos del perfil.")) return;
+  const handleUpdateLevel = async (id, currentLvl, amount) => {
+    const newLvl = Math.max(1, Math.min(10, currentLvl + amount));
     try {
-      // Llamamos a la función RPC que elimina tanto de Auth como de Profiles
-      const { error } = await supabase.rpc('delete_user_permanently', { 
-        target_user_id: id 
-      });
-      
+      const { error } = await supabase.from('profiles').update({ current_level: newLvl }).eq('id', id);
       if (error) throw error;
       fetchStudents();
     } catch (err) {
-      console.error(err);
-      alert("Error al eliminar el usuario: " + (err.message || "Error desconocido"));
+      alert("Error al actualizar nivel del mapa");
+    }
+  };
+
+  const handleDelete = async (id) => {
+    if(!window.confirm("¿Estás seguro de eliminar este registro permanentemente?")) return;
+    try {
+      const { error } = await supabase.rpc('delete_user_permanently', { target_user_id: id });
+      if (error) throw error;
+      fetchStudents();
+    } catch (err) {
+      alert("Error al eliminar el usuario");
     }
   };
 
@@ -114,48 +148,27 @@ export default function AdminDashboard({ session, profile }) {
   };
 
   const handleResetPassword = async (student) => {
-    if (!window.confirm(`¿Estás seguro de resetear la contraseña de ${student.full_name}? Se generará una clave temporal.`)) return;
-    
-    // Generate a secure temporary password
+    if (!window.confirm(`¿Resetear contraseña de ${student.full_name}?`)) return;
     const tempPassword = `Cato${Math.floor(1000 + Math.random() * 9000)}!`;
-    
     try {
-      const { data, error } = await supabase.rpc('reset_user_password', { 
-        target_user_id: student.id, 
-        new_password: tempPassword 
-      });
-
+      const { error } = await supabase.rpc('reset_user_password', { target_user_id: student.id, new_password: tempPassword });
       if (error) throw error;
-      
-      setResetResult({
-        name: student.full_name,
-        email: student.email,
-        newPassword: tempPassword
-      });
+      await supabase.from('profiles').update({ must_change_password: true }).eq('id', student.id);
+      setResetResult({ name: student.full_name, email: student.email, newPassword: tempPassword });
     } catch (err) {
-      console.error(err);
-      alert(`Error al resetear contraseña: ${err.message || 'Error desconocido'}`);
+      alert("Error al resetear contraseña");
     }
   };
 
   const handleResetSemester = async () => {
-    if (!window.confirm("¡ATENCIÓN! Esta acción restablecerá el XP y Nivel de TODOS los estudiantes a cero para iniciar el nuevo semestre. ¿Deseas continuar?")) return;
-    
+    if (!window.confirm("¿Reiniciar todo el semestre?")) return;
     try {
-      setLoading(true);
-      const { error } = await supabase
-        .from('profiles')
-        .update({ xp_total: 0, current_level: 1 })
-        .eq('role', 'student');
-        
+      const { error } = await supabase.from('profiles').update({ xp_total: 0, current_level: 1 }).eq('role', 'student');
       if (error) throw error;
-      alert("Semestre reiniciado con éxito.");
       fetchStudents();
+      alert("Reiniciado con éxito");
     } catch (err) {
-      console.error(err);
-      alert("Error al reiniciar el semestre.");
-    } finally {
-      setLoading(false);
+      alert("Error al reiniciar");
     }
   };
 
@@ -163,507 +176,393 @@ export default function AdminDashboard({ session, profile }) {
     e.preventDefault();
     try {
       let activityToSave = { ...editingActivity };
-      
-      // If no ID, it's a new activity, find the next one
-      if (!activityToSave.id) {
-        const nextId = (activities.length > 0 ? Math.max(...activities.map(a => a.id)) + 1 : 1);
-        activityToSave.id = nextId;
-      }
-
-      // Ensure QR Token exists
-      if (!activityToSave.qr_token) {
-        activityToSave.qr_token = `QUEST_${activityToSave.id}_${Math.random().toString(36).substr(2, 9).toUpperCase()}`;
-      }
-
-      const { error } = await supabase
-        .from('activities')
-        .upsert(activityToSave);
-      
+      if (!activityToSave.id) activityToSave.id = (activities.length > 0 ? Math.max(...activities.map(a => a.id)) + 1 : 1);
+      if (!activityToSave.qr_token) activityToSave.qr_token = `QUEST_${activityToSave.id}_${Math.random().toString(36).substr(2, 9).toUpperCase()}`;
+      const { error } = await supabase.from('activities').upsert(activityToSave);
       if (error) throw error;
       setEditingActivity(null);
       fetchActivities();
-      alert("¡Actividad guardada con éxito!");
+      alert("Guardado con éxito");
     } catch (err) {
-      console.error(err);
-      alert("Error al guardar actividad. Asegúrate de que la tabla 'activities' existe.");
+      alert("Error al guardar actividad");
     }
   };
 
-  // Stats
+  const handleSaveLevel = async (e) => {
+    e.preventDefault();
+    try {
+      const { error } = await supabase.from('levels').upsert(editingLevel);
+      if (error) throw error;
+      setEditingLevel(null);
+      if (onLevelsUpdate) onLevelsUpdate();
+      alert("Nivel actualizado");
+    } catch (err) {
+      alert("Error al guardar nivel");
+    }
+  };
+
+  const handleDeleteLevel = async (id) => {
+    if (!window.confirm("¿Eliminar nivel?")) return;
+    try {
+      const { error } = await supabase.from('levels').delete().eq('id', id);
+      if (error) throw error;
+      if (onLevelsUpdate) onLevelsUpdate();
+    } catch (err) {
+      alert("Error al eliminar nivel");
+    }
+  };
+
   const totalUsers = students.length;
   const suspendedUsers = students.filter(s => s.status === 'suspendido').length;
   const adminUsers = students.filter(s => s.role === 'admin' || s.role === 'master').length;
 
-  // Current Partial Logic
-  const isSecondPartial = new Date().getMonth() >= 6;
-  const currentPartialLabel = isSecondPartial ? 'SEGUNDO PARCIAL (P2)' : 'PRIMER PARCIAL (P1)';
-
   return (
     <div className="min-h-screen bg-[#F0F4FA] font-['Outfit'] pb-12">
-      {/* HEADER */}
-      <header className="bg-[#0012A6] text-white p-6 shadow-xl flex justify-between items-center relative z-10 sticky top-0">
-        <div className="flex items-center gap-4">
-          <div className="w-16 h-16 bg-white rounded-full p-1 flex items-center justify-center shadow-md">
-             <img 
-               src="https://raw.githubusercontent.com/Gael04-web/assets-web/4d78ca7b26809e93fe82d22386a538ee428eb9ff/logo_SER-removebg-preview.png" 
-               alt="Logo SER" 
-               className="w-full h-full object-contain" 
-             />
-          </div>
-          <div>
-            <h1 className="text-2xl font-black tracking-tight leading-tight">INDEPENDIENTES ECONOMÍA</h1>
-            <div className="flex items-center gap-2">
-               <p className="text-blue-200 text-[10px] font-bold opacity-80 uppercase tracking-widest bg-white/10 px-2 py-0.5 rounded-md">
-                 Panel {isMaster ? 'Master' : 'Administrativo'}
-               </p>
-               <span className="w-1.5 h-1.5 bg-emerald-400 rounded-full animate-pulse" />
-               <p className="text-emerald-300 text-[10px] font-black uppercase tracking-tighter">{currentPartialLabel}</p>
+      <header className="bg-[#0012A6] text-white p-4 md:p-6 shadow-xl sticky top-0 z-[50]">
+        <div className="max-w-7xl mx-auto flex flex-col md:flex-row justify-between items-center gap-4">
+          <div className="flex items-center gap-3 md:gap-4 w-full md:w-auto">
+            <div className="w-12 h-12 md:w-16 md:h-16 bg-white rounded-full p-1 flex items-center justify-center shrink-0">
+               <img src="https://raw.githubusercontent.com/Gael04-web/assets-web/4d78ca7b26809e93fe82d22386a538ee428eb9ff/logo_SER-removebg-preview.png" alt="Logo" className="w-full h-full object-contain" />
+            </div>
+            <div className="flex-1">
+              <h1 className="text-lg md:text-2xl font-black leading-tight">INDEPENDIENTES ECONOMÍA</h1>
             </div>
           </div>
-        </div>
-        <div className="flex items-center gap-3">
-          {isMaster && (
-            <button 
-              onClick={handleResetSemester}
-              className="bg-white text-[#0012A6] hover:bg-rose-50 hover:text-rose-600 px-5 py-3 rounded-2xl text-xs font-black transition-all border-b-4 border-slate-200 active:border-b-0 active:translate-y-1"
-            >
-              REINICIAR SEMESTRE
-            </button>
-          )}
-          <button 
-            onClick={() => supabase.auth.signOut()}
-            className="flex items-center gap-2 bg-white/10 hover:bg-rose-500/80 px-5 py-3 rounded-2xl text-sm font-bold transition-colors"
-          >
-            <LogOut size={18} /> Cerrar Sesión
-          </button>
+          
+          <div className="flex items-center gap-3 w-full md:w-auto justify-between md:justify-end border-t border-blue-400/30 pt-3 md:border-none md:pt-0">
+            <div className="flex items-center gap-2">
+              <div className="w-8 h-8 bg-blue-500 rounded-full flex items-center justify-center text-[10px] font-black border border-blue-400 uppercase">
+                {profile?.full_name?.charAt(0)}
+              </div>
+              <span className="text-[10px] font-black uppercase tracking-wider hidden sm:inline">{profile?.full_name?.split(' ')[0]}</span>
+            </div>
+
+            <div className="flex gap-2">
+              {isMaster && (
+                <button 
+                  onClick={handleResetSemester} 
+                  className="bg-white/10 hover:bg-white text-white hover:text-[#0012A6] px-3 py-2 md:px-4 md:py-2.5 rounded-xl text-[10px] font-black flex items-center gap-2 transition-all shadow-lg active:scale-95"
+                >
+                  <ShieldAlert size={16} />
+                  <span className="hidden sm:inline">REINICIAR SEMESTRE</span>
+                </button>
+              )}
+              <button 
+                onClick={() => supabase.auth.signOut()} 
+                className="bg-rose-500 hover:bg-rose-600 text-white px-3 py-2 md:px-4 md:py-2.5 rounded-xl text-[10px] font-black flex items-center gap-2 transition-all shadow-lg active:scale-95"
+                title="Cerrar Sesión"
+              >
+                <LogOut size={16} />
+                <span className="hidden sm:inline">SALIR</span>
+              </button>
+            </div>
+          </div>
         </div>
       </header>
 
       <main className="p-4 md:p-8 max-w-7xl mx-auto space-y-6">
-        
-        {/* TABS SELECTOR */}
-        <div className="flex bg-white p-1.5 rounded-2xl shadow-sm border border-slate-200 w-fit">
-           <button 
-             onClick={() => setActiveTab('usuarios')}
-             className={`px-6 py-2.5 rounded-xl font-black text-sm transition-all ${activeTab === 'usuarios' ? 'bg-[#0012A6] text-white shadow-md' : 'text-slate-400 hover:text-slate-600'}`}
-           >
-             USUARIOS
-           </button>
-           <button 
-             onClick={() => setActiveTab('actividades')}
-             className={`px-6 py-2.5 rounded-xl font-black text-sm transition-all ${activeTab === 'actividades' ? 'bg-[#0012A6] text-white shadow-md' : 'text-slate-400 hover:text-slate-600'}`}
-           >
-             ACTIVIDADES
-           </button>
+        <div className="flex bg-white p-1.5 rounded-2xl shadow-sm border border-slate-200 w-full md:w-fit overflow-x-auto no-scrollbar">
+           {['usuarios', 'actividades', 'niveles'].map(tab => (
+             <button 
+               key={tab}
+               onClick={() => setActiveTab(tab)}
+               className={`flex-1 md:flex-none px-6 py-3 rounded-xl font-black text-[10px] md:text-sm uppercase transition-all whitespace-nowrap ${activeTab === tab ? 'bg-[#0012A6] text-white shadow-lg' : 'text-slate-400 hover:text-slate-600'}`}
+             >
+               {tab}
+             </button>
+           ))}
         </div>
 
-        {activeTab === 'usuarios' ? (
-          <>
-            {/* ANALYTICS */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-          <div className="bg-white rounded-3xl p-6 shadow-sm border border-slate-100 flex items-center gap-5">
-            <div className="w-16 h-16 bg-blue-50 text-[#0012A6] rounded-2xl flex items-center justify-center">
-              <Users size={28} />
+        {activeTab === 'usuarios' && (
+          <div className="space-y-6">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+              {[
+                { label: 'TOTAL REGISTROS', val: totalUsers, icon: <Users />, bg: 'bg-blue-50', text: 'text-[#0012A6]' },
+                { label: 'SUSPENDIDOS', val: suspendedUsers, icon: <Ban />, bg: 'bg-rose-50', text: 'text-rose-600' },
+                { label: 'EQUIPO ADMIN', val: adminUsers, icon: <Shield />, bg: 'bg-amber-50', text: 'text-amber-500' }
+              ].map((stat, i) => (
+                <div key={i} className="bg-white rounded-[24px] md:rounded-[32px] p-5 md:p-6 shadow-sm border border-slate-100 flex items-center gap-4 md:gap-5">
+                  <div className={`w-12 h-12 md:w-16 md:h-16 ${stat.bg} ${stat.text} rounded-2xl flex items-center justify-center shrink-0`}>{stat.icon}</div>
+                  <div><p className="text-slate-400 font-bold text-[9px] md:text-sm uppercase tracking-wider">{stat.label}</p><h3 className="text-xl md:text-3xl font-black">{stat.val}</h3></div>
+                </div>
+              ))}
             </div>
-            <div>
-              <p className="text-slate-400 font-bold text-sm">TOTAL REGISTROS</p>
-              <h3 className="text-3xl font-black text-slate-800">{totalUsers}</h3>
-            </div>
-          </div>
-          
-          <div className="bg-white rounded-3xl p-6 shadow-sm border border-slate-100 flex items-center gap-5">
-            <div className="w-16 h-16 bg-rose-50 text-rose-600 rounded-2xl flex items-center justify-center">
-              <Ban size={28} />
-            </div>
-            <div>
-              <p className="text-slate-400 font-bold text-sm">SUSPENDIDOS</p>
-              <h3 className="text-3xl font-black text-slate-800">{suspendedUsers}</h3>
-            </div>
-          </div>
+            <div className="bg-white rounded-[32px] shadow-sm border border-slate-200 overflow-hidden">
+               {/* VISTA TABLET/PC (HIDDEN ON MOBILE) */}
+               <div className="hidden lg:block overflow-x-auto">
+                 <table className="w-full text-left">
+                   <thead className="bg-slate-50 text-slate-400 text-[10px] font-black uppercase tracking-widest">
+                     <tr>
+                       <th className="px-6 py-5">Usuario</th>
+                       <th className="px-6 py-5">Nivel / Progreso</th>
+                       <th className="px-6 py-5">Logros</th>
+                       <th className="px-6 py-5 text-center">Estado</th>
+                       {isMaster && <th className="px-6 py-5 text-center">Privilegios</th>}
+                       <th className="px-6 py-5 text-right">Administrar</th>
+                     </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                     {students.map(s => {
+                       const canEdit = s.id !== profile?.id && (isMaster || (s.role !== 'admin' && s.role !== 'master'));
+                       return (
+                         <tr key={s.id} className="hover:bg-slate-50/50 transition-colors">
+                           <td className="px-6 py-4">
+                             <div className="flex items-center gap-3">
+                               <div className="w-10 h-10 bg-slate-100 rounded-full flex items-center justify-center font-black uppercase text-slate-500">{s.full_name?.charAt(0)}</div>
+                               <div><p className="font-black text-slate-800 text-sm leading-tight">{s.full_name}</p><p className="text-[10px] text-slate-400 font-bold">{s.email}</p></div>
+                             </div>
+                           </td>
+                           <td className="px-6 py-4">
+                             <div className="flex flex-col gap-1.5">
+                               <div className="flex items-center gap-2">
+                                 <span className="bg-blue-50 text-[#0012A6] px-2 py-0.5 rounded text-[10px] font-black">NIVEL {getRank(s.xp_total)}</span>
+                                 <span className="text-amber-600 font-black text-xs">{s.xp_total} XP</span>
+                               </div>
+                               <span className="bg-emerald-50 text-emerald-600 px-2 py-0.5 rounded text-[10px] font-black uppercase">ACTIVIDAD: {s.current_level}/10</span>
+                             </div>
+                           </td>
+                           <td className="px-6 py-4">
+                             <div className="flex flex-wrap gap-1 max-w-[150px]">
+                               {s.badges && s.badges.length > 0 ? (
+                                 s.badges.map((b, i) => (
+                                   <span key={i} className="bg-amber-50 text-amber-600 px-2 py-0.5 rounded-[4px] text-[9px] font-bold border border-amber-100">
+                                     {b}
+                                   </span>
+                                 ))
+                               ) : (
+                                 <span className="text-slate-300 text-[10px] italic font-bold">Sin logros</span>
+                               )}
+                             </div>
+                           </td>
+                           <td className="px-6 py-4 text-center">
+                             <button disabled={!canEdit} onClick={() => handleUpdateStatus(s.id, s.status)} className={`text-[10px] font-black px-3 py-1 rounded-full border ${s.status === 'activo' ? 'bg-emerald-50 text-emerald-600 border-emerald-100' : 'bg-rose-50 text-rose-600 border-rose-100'}`}>{s.status.toUpperCase()}</button>
+                           </td>
+                           {isMaster && (
+                             <td className="px-6 py-4 text-center">
+                               <button disabled={s.id === profile?.id} onClick={() => handleUpdateRole(s.id, s.role)} className="text-[10px] font-black bg-slate-100 px-3 py-1.5 rounded-xl hover:bg-amber-100 transition-colors">{s.role === 'admin' ? 'REVOCAR' : 'HACER ADMIN'}</button>
+                             </td>
+                           )}
+                           <td className="px-6 py-4">
+                             <div className="flex items-center justify-end gap-3">
+                               <div className="flex flex-col gap-2 p-2 bg-slate-50 rounded-2xl border border-slate-100">
+                                 <div className="flex items-center justify-between gap-3 min-w-[120px]">
+                                   <span className="text-[9px] font-black text-slate-400 w-5">XP</span>
+                                   <div className="flex gap-1 items-center">
+                                     <button disabled={!canEdit} onClick={() => handleUpdateXP(s.id, s.xp_total, -100)} className="w-8 h-8 flex items-center justify-center bg-white text-rose-500 rounded-lg shadow-sm border border-rose-100 active:scale-90"><Minus size={14} strokeWidth={3} /></button>
+                                     <input type="number" disabled={!canEdit} key={`${s.id}-${s.xp_total}`} defaultValue={s.xp_total} onBlur={(e) => { const val = parseInt(e.target.value); if (!isNaN(val) && val !== s.xp_total) handleUpdateXP(s.id, 0, val); }} onKeyDown={(e) => e.key === 'Enter' && e.target.blur()} className="w-14 h-8 bg-white border border-slate-200 rounded-lg text-center font-black text-slate-700 text-[10px] outline-none" />
+                                     <button disabled={!canEdit} onClick={() => handleUpdateXP(s.id, s.xp_total, 100)} className="w-8 h-8 flex items-center justify-center bg-white text-emerald-600 rounded-lg shadow-sm border border-emerald-100 active:scale-90"><Plus size={14} strokeWidth={3} /></button>
+                                   </div>
+                                 </div>
+                                 <div className="flex items-center justify-between gap-3 min-w-[120px]">
+                                   <span className="text-[9px] font-black text-slate-400 w-5">MAP</span>
+                                   <div className="flex gap-1">
+                                     <button disabled={!canEdit} onClick={() => handleUpdateLevel(s.id, s.current_level, 1)} className="w-8 h-8 flex items-center justify-center bg-white text-blue-600 rounded-lg shadow-sm border border-blue-100 active:scale-90"><Plus size={14} strokeWidth={3} /></button>
+                                     <button disabled={!canEdit} onClick={() => handleUpdateLevel(s.id, s.current_level, -1)} className="w-8 h-8 flex items-center justify-center bg-white text-rose-500 rounded-lg shadow-sm border border-rose-100 active:scale-90"><Minus size={14} strokeWidth={3} /></button>
+                                   </div>
+                                 </div>
+                               </div>
+                               <div className="flex gap-1">
+                                 <button disabled={!canEdit} onClick={() => handleResetPassword(s)} className="w-10 h-10 flex items-center justify-center bg-amber-50 text-amber-600 rounded-xl hover:bg-amber-100 shadow-sm"><Key size={18} /></button>
+                                 <button disabled={!canEdit} onClick={() => handleDelete(s.id)} className="w-10 h-10 flex items-center justify-center bg-slate-100 text-slate-400 rounded-xl hover:bg-rose-100 hover:text-rose-600 shadow-sm"><Trash2 size={18} /></button>
+                               </div>
+                             </div>
+                           </td>
+                         </tr>
 
-          <div className="bg-white rounded-3xl p-6 shadow-sm border border-slate-100 flex items-center gap-5">
-            <div className="w-16 h-16 bg-amber-50 text-amber-500 rounded-2xl flex items-center justify-center">
-              <Shield size={28} />
-            </div>
-            <div>
-              <p className="text-slate-400 font-bold text-sm">EQUIPO ADMIN</p>
-              <h3 className="text-3xl font-black text-slate-800">{adminUsers}</h3>
-            </div>
-          </div>
-        </div>
-
-        {/* DATA TABLE */}
-        <div className="bg-white rounded-[32px] shadow-sm border border-slate-200 overflow-hidden">
-          <div className="p-6 border-b border-slate-100 flex items-center gap-3">
-             <ShieldAlert className="text-[#0012A6]" size={24} />
-             <h2 className="text-2xl font-black text-slate-800">Directorio de Estudiantes</h2>
-          </div>
-          
-          <div className="overflow-x-auto p-2">
-            <table className="w-full text-left border-collapse min-w-[800px]">
-              <thead>
-                <tr className="text-slate-400 text-sm">
-                  <th className="px-6 py-4 font-bold uppercase tracking-wider">Usuario</th>
-                  <th className="px-6 py-4 font-bold uppercase tracking-wider">Progreso</th>
-                  <th className="px-6 py-4 font-bold uppercase tracking-wider">Estado</th>
-                  {isMaster && <th className="px-6 py-4 font-bold uppercase tracking-wider text-center">Privilegios</th>}
-                  <th className="px-6 py-4 font-bold uppercase tracking-wider text-right">Administrar</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-50">
-                {students.map((student) => {
-                  // Admin logic: Regular admin can't touch another admin/master.
-                  const isTouchForbidden = !isMaster && (student.role === 'admin' || student.role === 'master');
-                  const isSelf = student.id === profile?.id;
-                  const canEdit = !isSelf && !isTouchForbidden;
-
-                  return (
-                    <tr key={student.id} className="hover:bg-slate-50/50 transition-colors group">
-                      
-                      {/* USUARIO */}
-                      <td className="px-6 py-4">
-                        <div className="flex items-center gap-4">
-                          <div className="w-12 h-12 bg-slate-100 rounded-full flex items-center justify-center text-slate-600 font-black">
-                            {student.full_name ? student.full_name.charAt(0).toUpperCase() : 'U'}
-                          </div>
-                          <div>
-                            <p className="font-black text-slate-800 flex items-center gap-2">
-                              {student.full_name || 'Sin Nombre'}
-                              {student.role === 'master' && <span className="bg-amber-100 text-amber-700 text-[10px] px-2 py-0.5 rounded-full uppercase tracking-wider border border-amber-200 shrink-0">Master</span>}
-                              {student.role === 'admin' && <span className="bg-blue-100 text-[#0012A6] text-[10px] px-2 py-0.5 rounded-full uppercase tracking-wider border border-blue-200 shrink-0">Admin</span>}
-                              {isSelf && <span className="text-[10px] text-slate-400 font-normal ml-1">(Tú)</span>}
-                            </p>
-                            <p className="text-slate-500 text-sm font-medium">{student.email}</p>
-                          </div>
-                        </div>
-                      </td>
-
-                      {/* PROGRESO */}
-                      <td className="px-6 py-4">
-                        <div className="flex items-center gap-3">
-                          <span className="flex items-center justify-center w-8 h-8 rounded-xl bg-slate-100 text-slate-700 font-black text-sm border border-slate-200">
-                            {student.current_level}
-                          </span>
-                          <span className="text-sm font-black text-slate-600 flex items-center gap-1 bg-amber-50 px-3 py-1 rounded-full border border-amber-100">
-                            <Star size={14} className="text-amber-500 fill-amber-500"/> {student.xp_total} XP
-                          </span>
-                        </div>
-                      </td>
-
-                      {/* ESTADO */}
-                      <td className="px-6 py-4">
-                        <button 
-                          disabled={!canEdit}
-                          onClick={() => handleUpdateStatus(student.id, student.status)}
-                          className={`px-4 py-1.5 text-xs font-black rounded-full border transition-all ${
-                            student.status === 'activo' 
-                            ? 'bg-emerald-50 text-emerald-600 border-emerald-200 hover:bg-emerald-100' 
-                            : 'bg-rose-50 text-rose-600 border-rose-200 hover:bg-rose-100'
-                          } ${!canEdit ? 'opacity-50 cursor-not-allowed' : ''}`}
-                        >
-                          {student.status.toUpperCase()}
-                        </button>
-                      </td>
-
-                      {/* PRIVILEGIOS (Solo Master) */}
-                      {isMaster && (
-                        <td className="px-6 py-4 text-center">
-                          <button 
-                            disabled={isSelf || student.role === 'master'}
-                            onClick={() => handleUpdateRole(student.id, student.role)}
-                            className={`flex items-center justify-center gap-1 mx-auto px-3 py-1.5 rounded-xl font-bold text-xs border transition ${
-                              student.role === 'admin' 
-                              ? 'bg-amber-100 border-amber-300 text-amber-700 hover:bg-amber-200' 
-                              : 'bg-slate-100 border-slate-200 text-slate-500 hover:bg-slate-200'
-                            } ${(isSelf || student.role === 'master') ? 'opacity-30 cursor-not-allowed' : ''}`}
-                          >
-                            {student.role === 'admin' ? <Shield size={14} /> : <UserCheck size={14} />}
-                            {student.role === 'admin' ? 'Revocar' : 'Hacer Admin'}
-                          </button>
-                        </td>
-                      )}
-
-                      {/* ADMINISTRAR (XP & Eliminar) */}
-                      <td className="px-6 py-4 text-right">
-                        <div className="flex items-center justify-end gap-2">
-                          <button 
-                            disabled={!canEdit}
-                            title="Descontar 50 XP (Penalidad)"
-                            onClick={() => handleUpdateXP(student.id, student.xp_total, -50)}
-                            className={`w-9 h-9 flex items-center justify-center bg-rose-50 hover:bg-rose-100 text-rose-600 rounded-xl transition ${!canEdit && 'opacity-30 cursor-not-allowed'}`}
-                          >
-                            <Minus size={18} strokeWidth={3} />
-                          </button>
-                          <button 
-                            disabled={!canEdit}
-                            title="Otorgar 50 XP (Bonificación)"
-                            onClick={() => handleUpdateXP(student.id, student.xp_total, 50)}
-                            className={`w-9 h-9 flex items-center justify-center bg-emerald-50 hover:bg-emerald-100 text-emerald-600 rounded-xl transition ${!canEdit && 'opacity-30 cursor-not-allowed'}`}
-                          >
-                            <Plus size={18} strokeWidth={3} />
-                          </button>
-                          <div className="w-px h-6 bg-slate-200 mx-1"></div>
-                          <button 
-                            disabled={!canEdit || isSelf || student.role === 'master'}
-                            onClick={() => handleResetPassword(student)}
-                            className={`w-9 h-9 flex items-center justify-center border border-slate-200 rounded-xl transition-all ${(isSelf || student.role === 'master') ? 'opacity-20 bg-slate-100 cursor-not-allowed' : 'bg-white hover:bg-amber-50 hover:border-amber-400 hover:text-amber-600'}`}
-                            title="Resetear Contraseña a clave temporal"
-                          >
-                            <Key size={16} />
-                          </button>
-                          <button 
-                            disabled={!canEdit}
-                            title="Eliminar Perfil"
-                            onClick={() => handleDelete(student.id)}
-                            className={`w-9 h-9 flex items-center justify-center hover:bg-rose-600 text-slate-300 hover:text-white rounded-xl transition ${!canEdit && 'opacity-30 cursor-not-allowed'}`}
-                          >
-                            <Trash2 size={18} />
-                          </button>
-                        </div>
-                      </td>
-
-                    </tr>
-                  );
-                })}
-                {students.length === 0 && !loading && (
-                   <tr>
-                     <td colSpan={6} className="p-12 text-center text-slate-400 font-bold">
-                       Aún no hay perfiles registrados en la base de datos.
-                     </td>
-                   </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      </>
-    ) : (
-          /* ACTIVITIES MANAGEMENT */
-          <div className="bg-white rounded-[32px] shadow-sm border border-slate-200 overflow-hidden">
-            <div className="p-6 border-b border-slate-100 flex items-center justify-between">
-               <div className="flex items-center gap-3">
-                 <Star className="text-amber-500" size={24} />
-                 <h2 className="text-2xl font-black text-slate-800">Gestión de Actividades</h2>
+                       );
+                     })}
+                   </tbody>
+                 </table>
                </div>
-               <button 
-                 onClick={() => setEditingActivity({ title: '', pts: 0, p1: '', f1: '', p2: '', f2: '', lugar: 'Campus', hora: 'TBA' })}
-                 className="bg-[#0012A6] text-white px-6 py-3 rounded-2xl text-xs font-black shadow-[0_4px_0_0_#000B66] active:translate-y-1 active:shadow-none transition-all flex items-center gap-2"
-               >
-                 <Plus size={16} strokeWidth={3} /> NUEVA ACTIVIDAD
-               </button>
-            </div>
 
-            <div className="overflow-x-auto p-4">
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                 {activities.map((act) => (
-                   <div key={act.id} className="bg-slate-50 rounded-[28px] p-6 border border-slate-200 flex flex-col justify-between">
-                      <div>
-                        <div className="flex justify-between items-start mb-4">
-                           <span className="bg-[#0012A6] text-white px-3 py-1 rounded-full text-[10px] font-black">ID: {act.id}</span>
-                           <span className="text-amber-600 font-black text-sm">{act.pts} Puntos</span>
-                        </div>
-                        <h3 className="text-xl font-black text-slate-800 mb-4">{act.title}</h3>
-                        
-                        <div className="space-y-3 mb-6">
-                           <div className="bg-white p-3 rounded-2xl border border-slate-100">
-                              <p className="text-[10px] font-black text-blue-400 uppercase mb-1">P1: {act.p1}</p>
-                              <p className="text-xs font-bold text-slate-600">{act.f1}</p>
+               {/* VISTA MÓVIL (CARDS) */}
+               <div className="lg:hidden divide-y divide-slate-100">
+                 {students.map(s => {
+                   const canEdit = s.id !== profile?.id && (isMaster || (s.role !== 'admin' && s.role !== 'master'));
+                   return (
+                     <div key={s.id} className="p-5 space-y-5">
+                       <div className="flex items-center justify-between gap-4">
+                         <div className="flex items-center gap-3">
+                           <div className="w-12 h-12 bg-[#0012A6]/5 text-[#0012A6] rounded-2xl flex items-center justify-center font-black uppercase text-lg border border-[#0012A6]/10 shrink-0">{s.full_name?.charAt(0)}</div>
+                           <div className="min-w-0">
+                             <p className="font-black text-slate-800 leading-tight truncate">{s.full_name}</p>
+                             <p className="text-[10px] text-slate-400 font-bold mt-0.5 truncate">{s.email}</p>
                            </div>
-                           <div className="bg-white p-3 rounded-2xl border border-slate-100">
-                              <p className="text-[10px] font-black text-amber-500 uppercase mb-1">P2: {act.p2}</p>
-                              <p className="text-xs font-bold text-slate-600">{act.f2}</p>
-                           </div>
-                        </div>
-                      </div>
+                         </div>
+                         <button disabled={!canEdit} onClick={() => handleUpdateStatus(s.id, s.status)} className={`shrink-0 text-[10px] font-black px-4 py-1.5 rounded-full border shadow-sm ${s.status === 'activo' ? 'bg-emerald-50 text-emerald-600 border-emerald-100' : 'bg-rose-50 text-rose-600 border-rose-100'}`}>{s.status.toUpperCase()}</button>
+                       </div>
 
-                      <div className="flex gap-2">
-                        <button 
-                          onClick={() => setEditingActivity(act)}
-                          className="flex-[2] bg-white border border-slate-200 hover:border-[#0012A6] hover:text-[#0012A6] py-3 rounded-2xl font-black text-sm transition-all"
-                        >
-                          EDITAR
-                        </button>
-                        <button 
-                          onClick={() => setQrModalActivity(act)}
-                          className="flex-1 bg-amber-500 text-white hover:bg-amber-600 py-3 rounded-2xl font-black text-sm transition-all flex items-center justify-center gap-2"
-                          title="Mostrar código QR para estudiantes"
-                        >
-                          <QrCode size={18} />
-                          QR
-                        </button>
-                      </div>
-                   </div>
-                 ))}
-              </div>
-              {activities.length === 0 && !loading && (
-                 <div className="p-12 text-center text-slate-400 font-bold">
-                   No se encontraron actividades. Asegúrate de que la tabla 'activities' existe en Supabase.
-                 </div>
-              )}
+                       <div className="grid grid-cols-2 gap-4">
+                         <div className="bg-slate-50 p-4 rounded-3xl border border-slate-100">
+                           <p className="text-[8px] font-black text-slate-400 uppercase mb-1 tracking-widest text-center">NIVEL ACTUAL</p>
+                           <p className="text-xs font-black text-[#0012A6] text-center">NIVEL {getRank(s.xp_total)}</p>
+                           <p className="text-[14px] font-black text-amber-600 text-center mt-0.5">{s.xp_total} <span className="text-[9px]">XP</span></p>
+                         </div>
+                         <div className="bg-slate-50 p-4 rounded-3xl border border-slate-100">
+                           <p className="text-[8px] font-black text-slate-400 uppercase mb-1 tracking-widest text-center">MAPA (ACT.)</p>
+                           <p className="text-xs font-black text-emerald-600 text-center">{s.current_level} DE 10</p>
+                           <div className="w-full bg-slate-200 h-1.5 rounded-full mt-2 overflow-hidden"><div className="bg-emerald-500 h-full transition-all duration-500" style={{ width: `${(s.current_level/10)*100}%` }}></div></div>
+                         </div>
+                       </div>
+
+                       <div className="flex flex-col gap-3 p-4 bg-slate-50 rounded-[32px] border border-slate-100">
+                          <div className="flex items-center justify-between px-1">
+                             <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">PUNTOS XP</span>
+                             <div className="flex gap-2 items-center">
+                               <button disabled={!canEdit} onClick={() => handleUpdateXP(s.id, s.xp_total, -100)} className="w-11 h-11 flex items-center justify-center bg-white text-rose-500 rounded-2xl shadow-sm border border-rose-100 active:scale-90"><Minus size={20} strokeWidth={3} /></button>
+                               <input type="number" disabled={!canEdit} key={`mob-${s.id}-${s.xp_total}`} defaultValue={s.xp_total} onBlur={(e) => { const val = parseInt(e.target.value); if (!isNaN(val) && val !== s.xp_total) handleUpdateXP(s.id, 0, val); }} onKeyDown={(e) => e.key === 'Enter' && e.target.blur()} className="w-24 h-11 bg-white border border-slate-200 rounded-2xl text-center font-black text-[#0012A6] text-sm" />
+                               <button disabled={!canEdit} onClick={() => handleUpdateXP(s.id, s.xp_total, 100)} className="w-11 h-11 flex items-center justify-center bg-white text-emerald-600 rounded-2xl shadow-sm border border-emerald-100 active:scale-90"><Plus size={20} strokeWidth={3} /></button>
+                             </div>
+                          </div>
+                          <div className="h-px bg-slate-200 w-full opacity-50"></div>
+                          <div className="flex items-center justify-between px-1">
+                             <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">MAPA</span>
+                             <div className="flex gap-2 items-center">
+                               <button disabled={!canEdit} onClick={() => handleUpdateLevel(s.id, s.current_level, -1)} className="w-11 h-11 flex items-center justify-center bg-white text-rose-500 rounded-2xl shadow-sm border border-rose-100 active:scale-90"><Minus size={20} strokeWidth={3} /></button>
+                               <div className="w-24 h-11 flex items-center justify-center bg-white border border-slate-200 rounded-2xl font-black text-[#0012A6] text-sm">{s.current_level}/10</div>
+                               <button disabled={!canEdit} onClick={() => handleUpdateLevel(s.id, s.current_level, 1)} className="w-11 h-11 flex items-center justify-center bg-white text-blue-600 rounded-2xl shadow-sm border border-blue-100 active:scale-90"><Plus size={20} strokeWidth={3} /></button>
+                             </div>
+                          </div>
+                       </div>
+
+                       <div className="flex gap-2 pt-2">
+                         <button disabled={!canEdit} onClick={() => handleResetPassword(s)} className="flex-1 bg-amber-50 text-amber-600 py-4 rounded-2xl font-black text-[10px] uppercase tracking-widest flex items-center justify-center gap-2 border border-amber-100 shadow-sm active:scale-95 transition-all"><Key size={16} /> PASSWORD</button>
+                         <button disabled={!canEdit} onClick={() => handleDelete(s.id)} className="w-14 h-14 flex items-center justify-center bg-rose-50 text-rose-500 rounded-2xl border border-rose-100 shadow-sm active:scale-95 transition-all"><Trash2 size={20} /></button>
+                         {isMaster && (
+                           <button disabled={s.id === profile?.id} onClick={() => handleUpdateRole(s.id, s.role)} className="w-14 h-14 flex items-center justify-center bg-[#0012A6] text-white rounded-2xl shadow-lg active:scale-95 transition-all" title={s.role === 'admin' ? 'Revocar Admin' : 'Hacer Admin'}><Shield size={20} /></button>
+                         )}
+                       </div>
+                     </div>
+                   );
+                 })}
+               </div>
             </div>
           </div>
         )}
 
-        {/* EDIT MODAL */}
+        {activeTab === 'actividades' && (
+          <div className="bg-white rounded-[32px] shadow-sm border border-slate-200 overflow-hidden">
+            <div className="p-6 border-b border-slate-100 flex items-center justify-between">
+               <h2 className="text-xl font-black flex items-center gap-2"><Star className="text-amber-500" /> GESTIÓN DE ACTIVIDADES</h2>
+               <button onClick={() => setEditingActivity({ title: '', pts: 0, lugar: 'Campus' })} className="bg-[#0012A6] text-white px-6 py-3 rounded-2xl text-xs font-black shadow-md flex items-center gap-2 transition-all active:translate-y-1"><Plus size={16} /> NUEVA ACTIVIDAD</button>
+            </div>
+            <div className="p-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+               {activities.map(act => (
+                 <div key={act.id} className="bg-slate-50 p-6 rounded-[28px] border border-slate-200 flex flex-col h-full">
+                    <div className="flex justify-between mb-2"><span className="text-[10px] font-black text-slate-400 uppercase">ID: {act.id}</span><span className="text-amber-600 font-black text-sm">{act.pts} PTS</span></div>
+                    <h3 className="text-lg font-black text-slate-800 mb-2">{act.title}</h3>
+                    <div className="mb-4 space-y-1">
+                      {act.lugar && <p className="text-[10px] font-bold text-slate-500 uppercase mt-2">Lugar: <span className="font-normal text-slate-400">{act.lugar}</span></p>}
+                    </div>
+                    <div className="flex gap-2 mt-auto">
+                      <button onClick={() => setEditingActivity(act)} className="flex-1 bg-white border border-slate-200 py-3 rounded-xl font-black text-xs hover:border-[#0012A6] transition-all">EDITAR</button>
+                      <button onClick={() => setQrModalActivity(act)} className="w-12 flex items-center justify-center bg-amber-500 text-white rounded-xl hover:bg-amber-600 transition-all"><QrCode size={18} /></button>
+                    </div>
+                 </div>
+               ))}
+            </div>
+          </div>
+        )}
+
+        {activeTab === 'niveles' && (
+          <div className="space-y-6">
+            <div className="bg-white p-6 rounded-[32px] border border-slate-200 shadow-sm flex justify-between items-center">
+               <div><h2 className="text-xl font-black">Escalafón de Niveles</h2><p className="text-slate-400 text-xs font-bold">Configura XP y premios.</p></div>
+               <button onClick={() => setEditingLevel({ level: levels.length + 1, min_xp: 0, reward: '' })} className="bg-[#0012A6] text-white px-6 py-4 rounded-2xl font-black text-xs flex items-center gap-2 shadow-md active:translate-y-1"><Plus size={16} /> AGREGAR NIVEL</button>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+               {levels.map(lvl => (
+                 <div key={lvl.id} className="bg-white p-6 rounded-[32px] border border-slate-200 relative group transition-all hover:border-[#0012A6]/30">
+                    <div className="flex justify-between items-start mb-4">
+                       <div className="w-12 h-12 bg-blue-50 text-[#0012A6] rounded-2xl flex items-center justify-center font-black text-xl">{lvl.level}</div>
+                       <div className="flex gap-1">
+                          <button onClick={() => setEditingLevel(lvl)} className="p-2 bg-slate-50 text-slate-400 hover:text-[#0012A6] rounded-lg transition-colors"><Shield size={16} /></button>
+                          <button onClick={() => handleDeleteLevel(lvl.id)} className="p-2 bg-slate-50 text-slate-400 hover:text-rose-600 rounded-lg transition-colors"><Trash2 size={16} /></button>
+                       </div>
+                    </div>
+                    <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">RECOMPENSA</p>
+                    <p className="font-black text-slate-800 mb-4">{lvl.reward || 'S/N'}</p>
+                    <div className="bg-slate-50 p-4 rounded-2xl border border-slate-100"><p className="text-[10px] font-black text-slate-400 uppercase mb-1">XP MÍNIMO</p><p className="text-2xl font-black text-[#0012A6]">{lvl.min_xp.toLocaleString()} <span className="text-xs text-blue-300">PTS</span></p></div>
+                 </div>
+               ))}
+            </div>
+          </div>
+        )}
+
+        {/* MODALS SECTION */}
         {editingActivity && (
           <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
              <div className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm" onClick={() => setEditingActivity(null)} />
-             <div className="relative bg-white w-full max-w-2xl rounded-[40px] shadow-2xl overflow-hidden animate-in fade-in zoom-in duration-200">
-                <div className="bg-[#0012A6] p-8 text-white">
-                   <h2 className="text-3xl font-black italic">EDITAR ACTIVIDAD #{editingActivity.id}</h2>
-                   <p className="opacity-70 font-bold uppercase text-xs tracking-widest">Asegúrate de guardar los cambios para aplicarlos a todos los estudiantes.</p>
-                </div>
-                
-                <form onSubmit={handleSaveActivity} className="p-8 space-y-6">
+             <div className="relative bg-white w-full max-w-2xl rounded-[40px] shadow-2xl p-8 overflow-hidden animate-in zoom-in duration-200">
+                <h2 className="text-2xl font-black mb-6">EDITAR ACTIVIDAD</h2>
+                <form onSubmit={handleSaveActivity} className="space-y-4">
                    <div className="grid grid-cols-2 gap-4">
                       <div className="col-span-2">
-                        <label className="text-[10px] font-black text-slate-400 uppercase ml-2">Título de la Actividad</label>
-                        <input 
-                          type="text" 
-                          className="w-full bg-slate-50 border border-slate-200 p-4 rounded-2xl font-bold outline-none focus:border-[#0012A6]"
-                          value={editingActivity.title}
-                          onChange={e => setEditingActivity({...editingActivity, title: e.target.value})}
-                        />
+                         <label className="text-[10px] font-black text-slate-400 ml-2">TÍTULO</label>
+                         <input type="text" className="w-full bg-slate-50 border border-slate-200 p-4 rounded-2xl font-bold outline-none focus:border-[#0012A6]" value={editingActivity.title || ''} onChange={e => setEditingActivity({...editingActivity, title: e.target.value})} />
                       </div>
                       <div>
-                        <label className="text-[10px] font-black text-slate-400 uppercase ml-2">Puntos (XP)</label>
-                        <input 
-                          type="number" 
-                          className="w-full bg-slate-50 border border-slate-200 p-4 rounded-2xl font-bold outline-none focus:border-[#0012A6]"
-                          value={editingActivity.pts}
-                          onChange={e => setEditingActivity({...editingActivity, pts: parseInt(e.target.value)})}
-                        />
+                         <label className="text-[10px] font-black text-slate-400 ml-2">XP</label>
+                         <input type="number" className="w-full bg-slate-50 border border-slate-200 p-4 rounded-2xl font-bold outline-none focus:border-[#0012A6]" value={editingActivity.pts || 0} onChange={e => setEditingActivity({...editingActivity, pts: parseInt(e.target.value)})} />
+                      </div>
+                      <div>
+                         <label className="text-[10px] font-black text-slate-400 ml-2">LUGAR</label>
+                         <input type="text" className="w-full bg-slate-50 border border-slate-200 p-4 rounded-2xl font-bold outline-none focus:border-[#0012A6]" value={editingActivity.lugar || ''} onChange={e => setEditingActivity({...editingActivity, lugar: e.target.value})} />
                       </div>
                    </div>
-
-                   <div className="grid grid-cols-2 gap-6">
-                      <div className="space-y-4">
-                        <h4 className="font-black text-blue-600 border-b pb-2">PRIMER PARCIAL</h4>
-                        <div>
-                          <label className="text-[10px] font-black text-slate-400 uppercase ml-2">Actividad P1</label>
-                          <input 
-                            type="text" 
-                            className="w-full bg-slate-50 border border-slate-200 p-3 rounded-xl font-bold outline-none focus:border-[#0012A6]"
-                            value={editingActivity.p1}
-                            onChange={e => setEditingActivity({...editingActivity, p1: e.target.value})}
-                          />
-                        </div>
-                        <div>
-                          <label className="text-[10px] font-black text-slate-400 uppercase ml-2">Fecha P1</label>
-                          <input 
-                            type="text" 
-                            className="w-full bg-slate-50 border border-slate-200 p-3 rounded-xl font-bold outline-none focus:border-[#0012A6]"
-                            value={editingActivity.f1}
-                            onChange={e => setEditingActivity({...editingActivity, f1: e.target.value})}
-                          />
-                        </div>
-                      </div>
-
-                      <div className="space-y-4">
-                        <h4 className="font-black text-amber-500 border-b pb-2">SEGUNDO PARCIAL</h4>
-                        <div>
-                          <label className="text-[10px] font-black text-slate-400 uppercase ml-2">Actividad P2</label>
-                          <input 
-                            type="text" 
-                            className="w-full bg-slate-50 border border-slate-200 p-3 rounded-xl font-bold outline-none focus:border-[#0012A6]"
-                            value={editingActivity.p2}
-                            onChange={e => setEditingActivity({...editingActivity, p2: e.target.value})}
-                          />
-                        </div>
-                        <div>
-                          <label className="text-[10px] font-black text-slate-400 uppercase ml-2">Fecha P2</label>
-                          <input 
-                            type="text" 
-                            className="w-full bg-slate-50 border border-slate-200 p-3 rounded-xl font-bold outline-none focus:border-[#0012A6]"
-                            value={editingActivity.f2}
-                            onChange={e => setEditingActivity({...editingActivity, f2: e.target.value})}
-                          />
-                        </div>
-                      </div>
-                   </div>
-
-                   <div className="flex gap-4 pt-4">
-                      <button 
-                        type="button"
-                        onClick={() => setEditingActivity(null)}
-                        className="flex-1 bg-slate-100 text-slate-500 font-black py-4 rounded-2xl active:scale-95 transition-all"
-                      >
-                        CANCELAR
-                      </button>
-                      <button 
-                        type="submit"
-                        className="flex-[2] bg-[#0012A6] text-white font-black py-4 rounded-2xl shadow-[0_6px_0_0_#000B66] active:translate-y-1 active:shadow-none transition-all"
-                      >
-                        GUARDAR CAMBIOS
-                      </button>
+                   <div className="flex gap-3 pt-4">
+                      <button type="button" onClick={() => setEditingActivity(null)} className="flex-1 bg-slate-100 py-4 rounded-2xl font-black text-slate-500">CANCELAR</button>
+                      <button type="submit" className="flex-[2] bg-[#0012A6] text-white py-4 rounded-2xl font-black shadow-lg">GUARDAR CAMBIOS</button>
                    </div>
                 </form>
              </div>
           </div>
         )}
 
-        {/* QR CODE MODAL */}
-        {qrModalActivity && (
-          <div className="fixed inset-0 z-[120] flex items-center justify-center p-4">
-            <div className="absolute inset-0 bg-slate-900/80 backdrop-blur-md" onClick={() => setQrModalActivity(null)} />
-            <div className="relative bg-white w-full max-w-sm rounded-[40px] shadow-2xl p-8 text-center animate-in zoom-in duration-300">
-               <div className="bg-amber-50 text-amber-600 w-16 h-16 rounded-2xl flex items-center justify-center mx-auto mb-4">
-                  <QrCode size={32} />
-               </div>
-               <h3 className="text-2xl font-black text-slate-800 mb-2">{qrModalActivity.title}</h3>
-               <p className="text-slate-500 text-sm font-bold mb-6 truncate px-4 bg-slate-100 py-2 rounded-xl border border-slate-200 uppercase tracking-widest">
-                  TOKEN: {qrModalActivity.qr_token || 'GENERANDO...'}
-               </p>
-               
-               <div className="bg-white border-8 border-slate-50 p-6 rounded-[32px] inline-block shadow-inner mb-6">
-                  <QRCodeSVG value={qrModalActivity.qr_token || ''} size={220} />
-               </div>
-               
-               <p className="text-slate-400 text-xs font-bold leading-relaxed mb-6 px-4">
-                  Muestra este código a los estudiantes para que lo escaneen desde su aplicación.
-               </p>
-               
-               <button 
-                 onClick={() => setQrModalActivity(null)}
-                 className="w-full bg-[#0012A6] text-white font-black py-4 rounded-2xl shadow-[0_4px_0_0_#000B66] active:translate-y-1 active:shadow-none transition-all"
-               >
-                 CERRAR VENTANA
-               </button>
-            </div>
+        {editingLevel && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+             <div className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm" onClick={() => setEditingLevel(null)} />
+             <div className="relative bg-white w-full max-w-md rounded-[40px] shadow-2xl p-8 animate-in zoom-in duration-200">
+                <h2 className="text-2xl font-black mb-6">CONFIGURAR NIVEL</h2>
+                <form onSubmit={handleSaveLevel} className="space-y-4">
+                   <div className="grid grid-cols-2 gap-4">
+                      <div><label className="text-[10px] font-black text-slate-400 ml-2">NIVEL #</label><input type="number" className="w-full bg-slate-50 border border-slate-200 p-4 rounded-2xl font-black outline-none focus:border-[#0012A6]" value={editingLevel.level} onChange={e => setEditingLevel({...editingLevel, level: parseInt(e.target.value)})} /></div>
+                      <div><label className="text-[10px] font-black text-slate-400 ml-2">XP MÍNIMO</label><input type="number" className="w-full bg-slate-50 border border-slate-200 p-4 rounded-2xl font-black outline-none focus:border-[#0012A6]" value={editingLevel.min_xp} onChange={e => setEditingLevel({...editingLevel, min_xp: parseInt(e.target.value)})} /></div>
+                   </div>
+                   <div><label className="text-[10px] font-black text-slate-400 ml-2">RECOMPENSA</label><input type="text" className="w-full bg-slate-50 border border-slate-200 p-4 rounded-2xl font-black outline-none focus:border-[#0012A6]" value={editingLevel.reward || ''} onChange={e => setEditingLevel({...editingLevel, reward: e.target.value})} /></div>
+                   <div className="flex gap-3 pt-4">
+                      <button type="button" onClick={() => setEditingLevel(null)} className="flex-1 bg-slate-100 py-4 rounded-2xl font-black text-slate-500">CANCELAR</button>
+                      <button type="submit" className="flex-[2] bg-[#0012A6] text-white py-4 rounded-2xl font-black shadow-lg">GUARDAR NIVEL</button>
+                   </div>
+                </form>
+             </div>
           </div>
         )}
 
-        {/* PASSWORD RESET RESULT MODAL */}
+        {qrModalActivity && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+             <div className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm" onClick={() => setQrModalActivity(null)} />
+             <div className="relative bg-white w-full max-w-sm rounded-[40px] shadow-2xl p-8 text-center animate-in zoom-in duration-200">
+                <h3 className="text-xl font-black text-slate-800 mb-4">{qrModalActivity.title}</h3>
+                <div className="bg-slate-50 p-4 rounded-[32px] inline-block mb-6 border-4 border-white shadow-inner"><QRCodeSVG value={qrModalActivity.qr_token || ''} size={200} /></div>
+                <p className="text-slate-400 text-xs font-bold mb-6">Muestra este código para que los estudiantes sumen puntos.</p>
+                <button onClick={() => setQrModalActivity(null)} className="w-full bg-[#0012A6] text-white py-4 rounded-2xl font-black shadow-lg">CERRAR</button>
+             </div>
+          </div>
+        )}
+
         {resetResult && (
-          <div className="fixed inset-0 z-[150] flex items-center justify-center p-4">
-            <div className="absolute inset-0 bg-slate-900/80 backdrop-blur-md" onClick={() => setResetResult(null)} />
-            <div className="relative bg-white w-full max-w-sm rounded-[40px] shadow-2xl p-8 text-center animate-in zoom-in duration-300">
-               <div className="bg-emerald-50 text-emerald-600 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4 border-4 border-white shadow-xl">
-                  <Key size={32} />
-               </div>
-               <h3 className="text-2xl font-black text-slate-800 mb-2">¡Clave Reseteada!</h3>
-               <p className="text-slate-500 text-sm font-bold mb-6">
-                  La contraseña de <span className="text-slate-800">{resetResult.name}</span> ha sido cambiada.
-               </p>
-               
-               <div className="bg-slate-50 border-2 border-dashed border-slate-200 p-6 rounded-[32px] mb-8">
-                  <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Nueva Clave Temporal</p>
-                  <p className="text-3xl font-black text-[#0012A6] tracking-tight">{resetResult.newPassword}</p>
-               </div>
-               
-               <div className="bg-amber-50 p-4 rounded-2xl mb-8 border border-amber-100">
-                  <p className="text-amber-700 text-[10px] font-black leading-tight">
-                     COPIA ESTA CLAVE Y ENTRÉGALA AL USUARIO. NO PODRÁS VERLA DE NUEVO AL CERRAR ESTA VENTANA.
-                  </p>
-               </div>
-               
-               <button 
-                 onClick={() => setResetResult(null)}
-                 className="w-full bg-[#0012A6] text-white font-black py-4 rounded-2xl shadow-[0_4px_0_0_#000B66] active:translate-y-1 active:shadow-none transition-all"
-               >
-                 ENTENDIDO, COPIADA
-               </button>
-            </div>
+          <div className="fixed inset-0 z-[200] flex items-center justify-center p-4">
+             <div className="absolute inset-0 bg-slate-900/80 backdrop-blur-md" onClick={() => setResetResult(null)} />
+             <div className="relative bg-white w-full max-w-sm rounded-[40px] shadow-2xl p-8 text-center animate-in zoom-in duration-200">
+                <div className="bg-emerald-50 text-emerald-600 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4 border-4 border-white shadow-lg"><Key size={32} /></div>
+                <h3 className="text-2xl font-black text-slate-800 mb-2">¡Clave Reseteada!</h3>
+                <div className="bg-slate-50 p-6 rounded-[32px] mb-6 border-2 border-dashed border-slate-200">
+                   <p className="text-[10px] font-black text-slate-400 uppercase mb-2">Nueva Clave Temporal</p>
+                   <p className="text-3xl font-black text-[#0012A6] tracking-tight">{resetResult.newPassword}</p>
+                </div>
+                <button onClick={() => setResetResult(null)} className="w-full bg-[#0012A6] text-white py-4 rounded-2xl font-black shadow-lg">ENTENDIDO, COPIADA</button>
+             </div>
           </div>
         )}
       </main>
