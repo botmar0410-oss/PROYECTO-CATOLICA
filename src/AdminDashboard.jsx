@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { supabase } from './supabase';
-import { LogOut, Users, ShieldAlert, Star, Trash2, Plus, Minus, UserCheck, Shield, Ban, QrCode, Key } from 'lucide-react';
+import { LogOut, Users, ShieldAlert, Star, Trash2, Plus, Minus, UserCheck, Shield, Ban, QrCode, Key, Search } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
 
 export default function AdminDashboard({ session, profile, levels = [], onLevelsUpdate }) {
@@ -12,6 +12,7 @@ export default function AdminDashboard({ session, profile, levels = [], onLevels
   const [editingLevel, setEditingLevel] = useState(null);
   const [qrModalActivity, setQrModalActivity] = useState(null);
   const [resetResult, setResetResult] = useState(null); // { email, newPassword }
+  const [searchTerm, setSearchTerm] = useState('');
 
   const isMaster = profile?.role === 'master';
 
@@ -216,6 +217,11 @@ export default function AdminDashboard({ session, profile, levels = [], onLevels
   const suspendedUsers = students.filter(s => s.status === 'suspendido').length;
   const adminUsers = students.filter(s => s.role === 'admin' || s.role === 'master').length;
 
+  const filteredStudents = students.filter(s => 
+    (s.full_name?.toLowerCase() || '').includes(searchTerm.toLowerCase()) ||
+    (s.email?.toLowerCase() || '').includes(searchTerm.toLowerCase())
+  );
+
   return (
     <div className="min-h-screen bg-[#F0F4FA] font-['Outfit'] pb-12">
       <header className="bg-[#0012A6] text-white p-4 md:p-6 shadow-xl sticky top-0 z-[50]">
@@ -287,6 +293,19 @@ export default function AdminDashboard({ session, profile, levels = [], onLevels
                 </div>
               ))}
             </div>
+
+            {/* SEARCH BAR */}
+            <div className="bg-white p-2 rounded-2xl shadow-sm border border-slate-200 flex items-center gap-3 w-full md:w-96 relative">
+              <Search className="text-slate-400 ml-3 shrink-0" size={20} />
+              <input 
+                type="text" 
+                placeholder="Buscar por nombre o correo..." 
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                className="w-full bg-transparent border-none outline-none text-sm font-bold text-slate-700 py-3 pr-4"
+              />
+            </div>
+
             <div className="bg-white rounded-[32px] shadow-sm border border-slate-200 overflow-hidden">
                {/* VISTA TABLET/PC (HIDDEN ON MOBILE) */}
                <div className="hidden lg:block overflow-x-auto">
@@ -302,7 +321,7 @@ export default function AdminDashboard({ session, profile, levels = [], onLevels
                      </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
-                     {students.map(s => {
+                     {filteredStudents.map(s => {
                        const canEdit = s.id !== profile?.id && (isMaster || (s.role !== 'admin' && s.role !== 'master'));
                        return (
                          <tr key={s.id} className="hover:bg-slate-50/50 transition-colors">
@@ -377,7 +396,7 @@ export default function AdminDashboard({ session, profile, levels = [], onLevels
 
                {/* VISTA MÓVIL (CARDS) */}
                <div className="lg:hidden divide-y divide-slate-100">
-                 {students.map(s => {
+                 {filteredStudents.map(s => {
                    const canEdit = s.id !== profile?.id && (isMaster || (s.role !== 'admin' && s.role !== 'master'));
                    return (
                      <div key={s.id} className="p-5 space-y-5">
