@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { supabase } from './supabase';
 import { motion } from 'framer-motion';
-import { Mail, Lock, User, ChevronRight, AlertCircle } from 'lucide-react';
+import { Mail, Lock, User, ChevronRight, AlertCircle, GraduationCap, Hash, Calendar } from 'lucide-react';
 
 export default function Auth() {
   const [isLogin, setIsLogin] = useState(true);
@@ -11,8 +11,19 @@ export default function Auth() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [fullName, setFullName] = useState('');
+  const [carrera, setCarrera] = useState('');
+  const [ciclo, setCiclo] = useState('');
+  const [edad, setEdad] = useState('');
   const [acceptedTerms, setAcceptedTerms] = useState(false);
   const [showForgotMessage, setShowForgotMessage] = useState(false);
+  const [showCarreraDropdown, setShowCarreraDropdown] = useState(false);
+
+  const carreras = [
+    "Negocios internacionales",
+    "Contabilidad y Auditoría",
+    "Administración de empresa",
+    "Economía"
+  ];
 
   const handleAuth = async (e) => {
     e.preventDefault();
@@ -27,6 +38,9 @@ export default function Auth() {
         if (!email.toLowerCase().trim().endsWith('@cu.ucsg.edu.ec')) {
           throw new Error('Solo se permiten correos universitarios válidos (@cu.ucsg.edu.ec)');
         }
+        if (!carrera) {
+          throw new Error('Por favor selecciona tu carrera');
+        }
         if (!acceptedTerms) {
           throw new Error('Debes aceptar los Términos y Protección de Datos para registrarte');
         }
@@ -34,7 +48,12 @@ export default function Auth() {
           email,
           password,
           options: {
-            data: { full_name: fullName }
+            data: { 
+              full_name: fullName,
+              carrera: carrera,
+              ciclo: ciclo,
+              edad: edad
+            }
           }
         });
         if (error) throw error;
@@ -100,6 +119,69 @@ export default function Auth() {
                   onChange={e => setFullName(e.target.value)}
                   className="w-full bg-white/10 border border-white/20 text-white placeholder:text-slate-400 pl-12 pr-4 py-4 rounded-2xl outline-none focus:border-[#FFD233] transition-colors"
                 />
+              </div>
+            )}
+
+            {!isLogin && (
+              <div className="grid grid-cols-1 gap-4">
+                <div className="relative">
+                  <div 
+                    onClick={() => setShowCarreraDropdown(!showCarreraDropdown)}
+                    className="w-full bg-white/10 border border-white/20 text-white pl-12 pr-4 py-4 rounded-2xl outline-none focus:border-[#FFD233] transition-colors cursor-pointer flex items-center justify-between"
+                  >
+                    <GraduationCap className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" size={20} />
+                    <span className={carrera ? "text-white font-bold" : "text-slate-400"}>
+                      {carrera || "Selecciona tu carrera"}
+                    </span>
+                    <ChevronRight size={18} className={`transition-transform ${showCarreraDropdown ? 'rotate-90' : ''}`} />
+                  </div>
+
+                  {showCarreraDropdown && (
+                    <motion.div 
+                      initial={{ opacity: 0, y: -10 }}
+                      animate={{ opacity: 1, y: 5 }}
+                      className="absolute top-full left-0 right-0 z-50 bg-[#1E3A8A]/90 backdrop-blur-xl border border-white/20 rounded-2xl overflow-hidden shadow-2xl"
+                    >
+                      {carreras.map((c, idx) => (
+                        <div 
+                          key={idx}
+                          onClick={() => {
+                            setCarrera(c);
+                            setShowCarreraDropdown(false);
+                          }}
+                          className="p-4 hover:bg-white/10 text-white text-sm font-bold cursor-pointer transition-colors border-b border-white/5 last:border-none"
+                        >
+                          {c}
+                        </div>
+                      ))}
+                    </motion.div>
+                  )}
+                </div>
+                
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="relative">
+                    <Hash className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" size={20} />
+                    <input 
+                      type="text" 
+                      required
+                      placeholder="Ciclo"
+                      value={ciclo}
+                      onChange={e => setCiclo(e.target.value)}
+                      className="w-full bg-white/10 border border-white/20 text-white placeholder:text-slate-400 pl-12 pr-4 py-4 rounded-2xl outline-none focus:border-[#FFD233] transition-colors"
+                    />
+                  </div>
+                  <div className="relative">
+                    <Calendar className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" size={20} />
+                    <input 
+                      type="number" 
+                      required
+                      placeholder="Edad"
+                      value={edad}
+                      onChange={e => setEdad(e.target.value)}
+                      className="w-full bg-white/10 border border-white/20 text-white placeholder:text-slate-400 pl-12 pr-4 py-4 rounded-2xl outline-none focus:border-[#FFD233] transition-colors"
+                    />
+                  </div>
+                </div>
               </div>
             )}
 
