@@ -11,6 +11,8 @@ export default function Auth() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [fullName, setFullName] = useState('');
+  const [acceptedTerms, setAcceptedTerms] = useState(false);
+  const [showForgotMessage, setShowForgotMessage] = useState(false);
 
   const handleAuth = async (e) => {
     e.preventDefault();
@@ -24,6 +26,9 @@ export default function Auth() {
       } else {
         if (!email.toLowerCase().trim().endsWith('@cu.ucsg.edu.ec')) {
           throw new Error('Solo se permiten correos universitarios válidos (@cu.ucsg.edu.ec)');
+        }
+        if (!acceptedTerms) {
+          throw new Error('Debes aceptar los Términos y Protección de Datos para registrarte');
         }
         const { error } = await supabase.auth.signUp({
           email,
@@ -122,10 +127,47 @@ export default function Auth() {
               />
             </div>
 
+            {isLogin && (
+              <div className="flex justify-end px-1">
+                <button 
+                  type="button"
+                  onClick={() => setShowForgotMessage(true)}
+                  className="text-blue-300 text-xs font-bold hover:text-[#FFD233] transition-colors underline underline-offset-4 decoration-blue-300/30"
+                >
+                  ¿Olvidaste tu contraseña?
+                </button>
+              </div>
+            )}
+
+            {!isLogin && (
+              <div className="flex items-start gap-3 px-1 py-2">
+                <div className="relative flex items-center h-5">
+                  <input
+                    id="terms"
+                    type="checkbox"
+                    required
+                    checked={acceptedTerms}
+                    onChange={(e) => setAcceptedTerms(e.target.checked)}
+                    className="w-5 h-5 rounded border-white/20 bg-white/10 text-[#FFD233] focus:ring-[#FFD233] transition-all cursor-pointer"
+                  />
+                </div>
+                <label htmlFor="terms" className="text-xs text-slate-300 leading-tight cursor-pointer">
+                  <span className="font-bold text-white block mb-1">
+                    Términos y Protección de Datos <span className="text-red-500">*</span>
+                  </span>
+                  Al usar esta plataforma, autorizas el registro y tratamiento básico de tus datos únicamente para la gestión de actividades, beneficios y dinámicas de IECON. Tu información no será vendida ni compartida con terceros ajenos a la agrupación.
+                </label>
+              </div>
+            )}
+
             <button 
-              disabled={loading}
+              disabled={loading || (!isLogin && !acceptedTerms)}
               type="submit"
-              className="w-full bg-[#FFD233] text-[#0D1B2A] font-black py-4 rounded-2xl text-lg mt-6 shadow-[0_6px_0_0_#B48600] active:translate-y-1 active:shadow-none transition-all flex justify-center items-center gap-2"
+              className={`w-full font-black py-4 rounded-2xl text-lg mt-6 shadow-[0_6px_0_0_#B48600] active:translate-y-1 active:shadow-none transition-all flex justify-center items-center gap-2 ${
+                loading || (!isLogin && !acceptedTerms) 
+                ? 'bg-slate-700 text-slate-500 shadow-none translate-y-1 opacity-50 cursor-not-allowed' 
+                : 'bg-[#FFD233] text-[#0D1B2A]'
+              }`}
             >
               {loading ? 'Cargando...' : isLogin ? 'ENTRAR' : 'REGISTRARSE'}
               {!loading && <ChevronRight size={22} strokeWidth={3} />}
@@ -136,7 +178,11 @@ export default function Auth() {
             {isLogin ? '¿No tienes una cuenta?' : '¿Ya tienes una cuenta?'}
             <button 
                type="button"
-               onClick={() => setIsLogin(!isLogin)}
+               onClick={() => {
+                 setIsLogin(!isLogin);
+                 setAcceptedTerms(false);
+                 setError(null);
+               }}
                className="ml-2 text-white font-bold underline decoration-[#FFD233] decoration-2 underline-offset-4"
             >
               {isLogin ? 'Regístrate aquí' : 'Inicia Sesión'}
@@ -145,6 +191,31 @@ export default function Auth() {
 
         </motion.div>
       </div>
+
+      {/* Mensaje de Contraseña Olvidada */}
+      {showForgotMessage && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-6 bg-slate-900/80 backdrop-blur-sm animate-in fade-in duration-300">
+          <motion.div 
+            initial={{ scale: 0.9, opacity: 0 }}
+            animate={{ scale: 1, opacity: 1 }}
+            className="bg-white w-full max-w-sm rounded-[32px] p-8 shadow-2xl text-center border-t-8 border-[#FFD233]"
+          >
+            <div className="w-16 h-16 bg-blue-50 text-[#1D4ED8] rounded-2xl flex items-center justify-center mx-auto mb-4">
+              <Lock size={32} />
+            </div>
+            <h3 className="text-2xl font-black text-slate-800 mb-3">¿Problemas de Acceso?</h3>
+            <p className="text-slate-500 font-medium leading-relaxed mb-8">
+              Por favor, contacta con un <span className="text-[#1D4ED8] font-bold">administrador de IECON</span> para solicitar el restablecimiento de tu contraseña. Ellos te proporcionarán una clave temporal.
+            </p>
+            <button 
+              onClick={() => setShowForgotMessage(false)}
+              className="w-full bg-slate-900 text-white font-black py-4 rounded-2xl active:scale-95 transition-all shadow-lg"
+            >
+              ENTENDIDO
+            </button>
+          </motion.div>
+        </div>
+      )}
     </div>
   );
 }
