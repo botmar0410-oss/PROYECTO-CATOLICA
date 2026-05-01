@@ -84,14 +84,16 @@ export default function App() {
       else setIsAuthLoading(false);
     });
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
       setSession(session);
-      if (session) {
+      if (session && event === 'SIGNED_IN') {
+        // Solo en login nuevo — la carga inicial la maneja getSession() arriba
+        setIsAuthLoading(true);
         fetchProfile(session.user.id);
         fetchActivitiesFromDB();
         fetchLevels();
       }
-      else {
+      if (!session) {
         setProfile(null);
         setIsAuthLoading(false);
       }
@@ -463,7 +465,7 @@ export default function App() {
                     style={{ height: `${(activities.length * 250) + 300}px` }}
                   >
                     {activities.map((cp) => {
-                      const activityTitle = isSecondPartial ? (cp.p2 || cp.title) : (cp.p1 || cp.title);
+                      const activityTitle = cp.title; // Las partials ya no están en uso
                       return (
                         <CheckpointNode 
                           key={cp.id}
