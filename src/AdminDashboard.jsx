@@ -1,58 +1,79 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { supabase } from './supabase';
-import { LogOut, Users, ShieldAlert, Star, Trash2, Plus, Minus, UserCheck, Shield, Ban, QrCode, Key, Search } from 'lucide-react';
+import { LogOut, Users, ShieldAlert, Star, Trash2, Plus, Minus, UserCheck, Shield, Ban, QrCode, Key, Search, ChevronLeft, ChevronRight } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
+
+const PAGE_SIZE = 50;
 
 export default function AdminDashboard({ session, profile, levels = [], onLevelsUpdate }) {
   const [students, setStudents] = useState([]);
   const [activities, setActivities] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState('usuarios'); // 'usuarios', 'actividades', 'niveles'
+  const [activeTab, setActiveTab] = useState('usuarios');
   const [editingActivity, setEditingActivity] = useState(null);
   const [editingLevel, setEditingLevel] = useState(null);
   const [qrModalActivity, setQrModalActivity] = useState(null);
-  const [resetResult, setResetResult] = useState(null); // { email, newPassword }
+  const [resetResult, setResetResult] = useState(null);
   const [searchTerm, setSearchTerm] = useState('');
+  const [debouncedSearch, setDebouncedSearch] = useState('');
+  const [currentPage, setCurrentPage] = useState(0);
+  const [totalCount, setTotalCount] = useState(0);
 
+  const didMountSearch = useRef(false);
+  const didMountPage = useRef(false);
   const isMaster = profile?.role === 'master';
+  const totalPages = Math.ceil(totalCount / PAGE_SIZE);
 
+  // ─── Debounce search ───────────────────────────────────────────────────────
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedSearch(searchTerm), 400);
+    return () => clearTimeout(t);
+  }, [searchTerm]);
+
+  // ─── Re-fetch when search changes (skip first mount, handled by fetchData) ─
+  useEffect(() => {
+    if (!didMountSearch.current) { didMountSearch.current = true; return; }
+    setCurrentPage(0);
+    fetchStudents(0, debouncedSearch);
+  }, [debouncedSearch]);
+
+  // ─── Re-fetch when page changes (skip first mount) ─────────────────────────
+  useEffect(() => {
+    if (!didMountPage.current) { didMountPage.current = true; return; }
+    fetchStudents(currentPage, debouncedSearch);
+  }, [currentPage]);
+
+  // ─── Initial load + realtime channel ───────────────────────────────────────
   useEffect(() => {
     fetchData();
 
     const channel = supabase
       .channel('admin-profiles-changes')
-      .on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'profiles' },
-        (payload) => {
-          // OPTIMIZACIÓN: En lugar de hacer una nueva consulta a la base de datos completa (fetchStudents),
-          // actualizamos el estado local de React directamente con los datos que nos envía el evento en tiempo real.
-          setStudents((currentStudents) => {
-            if (payload.eventType === 'UPDATE') {
-              const updated = currentStudents.map(student => 
-                student.id === payload.new.id ? payload.new : student
-              );
-              // Volver a ordenar por xp_total descendente
-              return updated.sort((a, b) => b.xp_total - a.xp_total);
-            } else if (payload.eventType === 'INSERT') {
-              return [...currentStudents, payload.new].sort((a, b) => b.xp_total - a.xp_total);
-            } else if (payload.eventType === 'DELETE') {
-              return currentStudents.filter(student => student.id !== payload.old.id);
-            }
-            return currentStudents;
-          });
-        }
-      )
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'profiles' }, (payload) => {
+        setStudents((prev) => {
+          if (payload.eventType === 'UPDATE') {
+            return prev.map(s => s.id === payload.new.id ? { ...s, ...payload.new } : s)
+                       .sort((a, b) => b.xp_total - a.xp_total);
+          }
+          if (payload.eventType === 'INSERT') {
+            setTotalCount(c => c + 1);
+            return prev; // usuario nuevo aparecerá en la próxima recarga de página
+          }
+          if (payload.eventType === 'DELETE') {
+            setTotalCount(c => Math.max(0, c - 1));
+            return prev.filter(s => s.id !== payload.old.id);
+          }
+          return prev;
+        });
+      })
       .subscribe();
 
-    return () => {
-      supabase.removeChannel(channel);
-    };
+    return () => supabase.removeChannel(channel);
   }, []);
 
   const fetchData = async () => {
     setLoading(true);
-    await Promise.all([fetchStudents(true), fetchActivities()]);
+    await Promise.all([fetchStudents(0, ''), fetchActivities()]);
     setLoading(false);
   };
 
@@ -62,28 +83,38 @@ export default function AdminDashboard({ session, profile, levels = [], onLevels
         .from('activities')
         .select('*')
         .order('id', { ascending: true });
-      
       if (error && error.code !== 'PGRST116') throw error;
       if (data) setActivities(data);
     } catch (err) {
-      console.error("Error cargando actividades", err);
+      console.error('Error cargando actividades', err);
     }
   };
 
-  const fetchStudents = async (silent = false) => {
+  // Paginación server-side + búsqueda server-side (escala a 2000+ usuarios)
+  const fetchStudents = async (page = 0, search = '') => {
     try {
-      if (!silent) setLoading(true);
-      const { data, error } = await supabase
+      setLoading(true);
+      const from = page * PAGE_SIZE;
+      const to = from + PAGE_SIZE - 1;
+
+      let query = supabase
         .from('profiles')
-        .select('*')
-        .order('xp_total', { ascending: false });
-        
+        .select('id, full_name, email, xp_total, current_level, badges, status, role', { count: 'exact' })
+        .order('xp_total', { ascending: false })
+        .range(from, to);
+
+      if (search.trim()) {
+        query = query.or(`full_name.ilike.%${search}%,email.ilike.%${search}%`);
+      }
+
+      const { data, error, count } = await query;
       if (error) throw error;
-      setStudents(data);
+      setStudents(data || []);
+      setTotalCount(count || 0);
     } catch (err) {
-      console.error("Error cargando estudiantes", err);
+      console.error('Error cargando estudiantes', err);
     } finally {
-      if (!silent) setLoading(false);
+      setLoading(false);
     }
   };
 
@@ -92,9 +123,9 @@ export default function AdminDashboard({ session, profile, levels = [], onLevels
     try {
       const { error } = await supabase.from('profiles').update({ status: newStatus }).eq('id', id);
       if (error) throw error;
-      fetchStudents();
+      setStudents(prev => prev.map(s => s.id === id ? { ...s, status: newStatus } : s));
     } catch (err) {
-      alert("Error al actualizar estado");
+      alert('Error al actualizar estado');
     }
   };
 
@@ -109,9 +140,12 @@ export default function AdminDashboard({ session, profile, levels = [], onLevels
     try {
       const { error } = await supabase.from('profiles').update({ xp_total: newXP }).eq('id', id);
       if (error) throw error;
-      fetchStudents();
+      setStudents(prev =>
+        prev.map(s => s.id === id ? { ...s, xp_total: newXP } : s)
+            .sort((a, b) => b.xp_total - a.xp_total)
+      );
     } catch (err) {
-      alert("Error al actualizar XP");
+      alert('Error al actualizar XP');
     }
   };
 
@@ -120,20 +154,21 @@ export default function AdminDashboard({ session, profile, levels = [], onLevels
     try {
       const { error } = await supabase.from('profiles').update({ current_level: newLvl }).eq('id', id);
       if (error) throw error;
-      fetchStudents();
+      setStudents(prev => prev.map(s => s.id === id ? { ...s, current_level: newLvl } : s));
     } catch (err) {
-      alert("Error al actualizar nivel del mapa");
+      alert('Error al actualizar nivel del mapa');
     }
   };
 
   const handleDelete = async (id) => {
-    if(!window.confirm("¿Estás seguro de eliminar este registro permanentemente?")) return;
+    if (!window.confirm('¿Estás seguro de eliminar este registro permanentemente?')) return;
     try {
       const { error } = await supabase.rpc('delete_user_permanently', { target_user_id: id });
       if (error) throw error;
-      fetchStudents();
+      setStudents(prev => prev.filter(s => s.id !== id));
+      setTotalCount(c => Math.max(0, c - 1));
     } catch (err) {
-      alert("Error al eliminar el usuario");
+      alert('Error al eliminar el usuario');
     }
   };
 
@@ -142,9 +177,9 @@ export default function AdminDashboard({ session, profile, levels = [], onLevels
     try {
       const { error } = await supabase.from('profiles').update({ role: newRole }).eq('id', id);
       if (error) throw error;
-      fetchStudents();
+      setStudents(prev => prev.map(s => s.id === id ? { ...s, role: newRole } : s));
     } catch (err) {
-      alert("Error al cambiar rol");
+      alert('Error al cambiar rol');
     }
   };
 
@@ -162,14 +197,15 @@ export default function AdminDashboard({ session, profile, levels = [], onLevels
   };
 
   const handleResetSemester = async () => {
-    if (!window.confirm("¿Reiniciar todo el semestre?")) return;
+    if (!window.confirm('¿Reiniciar todo el semestre?')) return;
     try {
       const { error } = await supabase.from('profiles').update({ xp_total: 0, current_level: 1 }).eq('role', 'student');
       if (error) throw error;
-      fetchStudents();
-      alert("Reiniciado con éxito");
+      // Re-fetch completo porque afecta a todos los estudiantes
+      await fetchStudents(currentPage, debouncedSearch);
+      alert('Reiniciado con éxito');
     } catch (err) {
-      alert("Error al reiniciar");
+      alert('Error al reiniciar');
     }
   };
 
@@ -213,14 +249,11 @@ export default function AdminDashboard({ session, profile, levels = [], onLevels
     }
   };
 
-  const totalUsers = students.length;
+  // Stats basadas en datos del servidor (totalCount) o de la página actual
   const suspendedUsers = students.filter(s => s.status === 'suspendido').length;
   const adminUsers = students.filter(s => s.role === 'admin' || s.role === 'master').length;
-
-  const filteredStudents = students.filter(s => 
-    (s.full_name?.toLowerCase() || '').includes(searchTerm.toLowerCase()) ||
-    (s.email?.toLowerCase() || '').includes(searchTerm.toLowerCase())
-  );
+  // filteredStudents = students ya viene filtrado y paginado desde el servidor
+  const filteredStudents = students;
 
   return (
     <div className="min-h-screen bg-[#F0F4FA] font-['Outfit'] pb-12">
@@ -283,7 +316,7 @@ export default function AdminDashboard({ session, profile, levels = [], onLevels
           <div className="space-y-6">
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
               {[
-                { label: 'TOTAL REGISTROS', val: totalUsers, icon: <Users />, bg: 'bg-blue-50', text: 'text-[#0012A6]' },
+                { label: 'TOTAL REGISTROS', val: totalCount, icon: <Users />, bg: 'bg-blue-50', text: 'text-[#0012A6]' },
                 { label: 'SUSPENDIDOS', val: suspendedUsers, icon: <Ban />, bg: 'bg-rose-50', text: 'text-rose-600' },
                 { label: 'EQUIPO ADMIN', val: adminUsers, icon: <Shield />, bg: 'bg-amber-50', text: 'text-amber-500' }
               ].map((stat, i) => (
@@ -296,7 +329,7 @@ export default function AdminDashboard({ session, profile, levels = [], onLevels
 
             {/* SEARCH BAR */}
             <div className="bg-white p-2 rounded-2xl shadow-sm border border-slate-200 flex items-center gap-3 w-full md:w-96 relative">
-              <Search className="text-slate-400 ml-3 shrink-0" size={20} />
+              <Search className={`ml-3 shrink-0 transition-colors ${searchTerm !== debouncedSearch ? 'text-amber-400 animate-pulse' : 'text-slate-400'}`} size={20} />
               <input 
                 type="text" 
                 placeholder="Buscar por nombre o correo..." 
@@ -304,6 +337,9 @@ export default function AdminDashboard({ session, profile, levels = [], onLevels
                 onChange={(e) => setSearchTerm(e.target.value)}
                 className="w-full bg-transparent border-none outline-none text-sm font-bold text-slate-700 py-3 pr-4"
               />
+              {searchTerm && (
+                <button onClick={() => setSearchTerm('')} className="mr-2 text-slate-300 hover:text-slate-500 font-black text-lg leading-none">×</button>
+              )}
             </div>
 
             <div className="bg-white rounded-[32px] shadow-sm border border-slate-200 overflow-hidden">
@@ -456,6 +492,47 @@ export default function AdminDashboard({ session, profile, levels = [], onLevels
                  })}
                </div>
             </div>
+
+            {/* PAGINACIÓN */}
+            {totalPages > 1 && (
+              <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-4 flex items-center justify-between gap-4">
+                <p className="text-xs font-black text-slate-400">
+                  Mostrando <span className="text-slate-700">{currentPage * PAGE_SIZE + 1}–{Math.min((currentPage + 1) * PAGE_SIZE, totalCount)}</span> de <span className="text-slate-700">{totalCount}</span> registros
+                </p>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => setCurrentPage(p => Math.max(0, p - 1))}
+                    disabled={currentPage === 0 || loading}
+                    className="w-9 h-9 flex items-center justify-center bg-slate-100 text-slate-500 rounded-xl hover:bg-[#0012A6] hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all"
+                  >
+                    <ChevronLeft size={18} />
+                  </button>
+                  {Array.from({ length: Math.min(5, totalPages) }, (_, i) => {
+                    const page = Math.min(Math.max(currentPage - 2, 0) + i, totalPages - 1);
+                    return (
+                      <button
+                        key={page}
+                        onClick={() => setCurrentPage(page)}
+                        className={`w-9 h-9 rounded-xl font-black text-xs transition-all ${
+                          page === currentPage
+                            ? 'bg-[#0012A6] text-white shadow-lg'
+                            : 'bg-slate-100 text-slate-500 hover:bg-slate-200'
+                        }`}
+                      >
+                        {page + 1}
+                      </button>
+                    );
+                  })}
+                  <button
+                    onClick={() => setCurrentPage(p => Math.min(totalPages - 1, p + 1))}
+                    disabled={currentPage >= totalPages - 1 || loading}
+                    className="w-9 h-9 flex items-center justify-center bg-slate-100 text-slate-500 rounded-xl hover:bg-[#0012A6] hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all"
+                  >
+                    <ChevronRight size={18} />
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         )}
 
